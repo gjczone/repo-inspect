@@ -9,7 +9,11 @@ Complete reference for each subcommand of the `repo-inspect` binary.
 Search how a specific feature, technique, or concept is implemented.
 
 ```bash
+# 本地仓库
 repo-inspect --repo <path> find-how "<query>" [--depth 1-3]
+
+# 远程仓库（无需克隆）
+repo-inspect --repo owner/repo find-how "<query>" [--depth 1-3] [--refresh]
 ```
 
 **How it works**:
@@ -52,7 +56,7 @@ L18: `return compose(...chain)(store.dispatch)`
 Trace callers and callees of a symbol.
 
 ```bash
-repo-inspect --repo <path> trace <symbol> [--direction callers|callees|both]
+repo-inspect --repo <repo> trace <symbol> [--direction callers|callees|both]
 ```
 
 **Example**:
@@ -68,7 +72,7 @@ repo-inspect --repo ./redux trace createStore --direction both
 Find all entry points to the codebase.
 
 ```bash
-repo-inspect --repo <path> entries [--kind cli|http|event|plugin|all]
+repo-inspect --repo <repo> entries [--kind cli|http|event|plugin|all]
 ```
 
 **Examples**:
@@ -84,7 +88,7 @@ repo-inspect --repo ./webapp entries --kind http
 Detect design patterns, conventions, and idioms.
 
 ```bash
-repo-inspect --repo <path> patterns [--category creational|structural|behavioral|concurrency]
+repo-inspect --repo <repo> patterns [--category creational|structural|behavioral|concurrency]
 ```
 
 ---
@@ -94,7 +98,7 @@ repo-inspect --repo <path> patterns [--category creational|structural|behavioral
 Extract core data structures, type definitions, and schemas.
 
 ```bash
-repo-inspect --repo <path> data [--name <type-or-module>]
+repo-inspect --repo <repo> data [--name <type-or-module>]
 ```
 
 ---
@@ -104,7 +108,7 @@ repo-inspect --repo <path> data [--name <type-or-module>]
 Identify the most-changed and most-complex files.
 
 ```bash
-repo-inspect --repo <path> hotspots [--count 10]
+repo-inspect --repo <repo> hotspots [--count 10]
 ```
 
 Uses git history (`gix` crate) to rank files by:
@@ -118,9 +122,20 @@ Uses git history (`gix` crate) to rank files by:
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--repo <path>` | `.` | Path to repository root |
+| `--repo <repo>` | `.` | Repository: local path (e.g., `.`) or remote GitHub (e.g., `owner/repo`) |
 | `--output md` | `md` | Output format: `md` (Markdown) or `json` |
 | `--out-dir <path>` | `.inspect` | Where to write output files |
+| `--refresh` | Off | Force re-fetch remote repo, bypass 24h cache (remote mode only) |
+
+### Remote Mode
+
+When `--repo` is given in `owner/repo` format:
+1. Fetches the file tree from GitHub API (`git/trees/{branch}?recursive=1`)
+2. Downloads source files from `raw.githubusercontent.com`
+3. Caches files under `~/.cache/repo-inspect/remote/{owner}/{repo}/` with 24h TTL
+4. Then runs analysis on the cached files as if they were local
+
+Requires `GITHUB_TOKEN` env var for higher rate limits (optional, but recommended).
 
 ## Exit Codes
 

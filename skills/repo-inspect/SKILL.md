@@ -14,7 +14,8 @@ Surgically inspect a codebase to understand how specific features, patterns, or 
 ## Prerequisites
 
 - `scripts/repo-inspect` — the Rust binary. Must be executable. If missing, build from source: `cargo build --release && cp target/release/repo-inspect skills/repo-inspect/scripts/`
-- The target repository must be cloned locally (use `gh repo clone owner/repo -- --depth 1`)
+- For local repos: the target repository must be cloned on disk
+- For remote repos: set `GITHUB_TOKEN` environment variable (optional, but strongly recommended to avoid rate limiting). The binary fetches files from GitHub API without cloning — zero local disk space for the target repo.
 
 ## Workflow
 
@@ -28,16 +29,13 @@ ls .inspect/
 
 If results for the current question already exist, read them and answer. Skip to Step 4.
 
-### Step 1: Ensure the repo is available
+### Step 1: Decide local vs remote mode
 
-If the target is a remote GitHub repo, clone it (shallow):
+The `--repo` flag auto-detects the mode:
+- **Local**: pass a filesystem path, e.g., `--repo .` or `--repo /path/to/repo`
+- **Remote**: pass `owner/repo` format, e.g., `--repo gjczone/repo-inspect` — the binary fetches source files from GitHub API and caches them under `~/.cache/repo-inspect/remote/` with a 24h TTL. Use `--refresh` to force re-fetch.
 
-```bash
-gh repo clone <owner/repo> -- --depth 1
-cd <repo>
-```
-
-If already in the target repo, verify with `git remote get-url origin`.
+If you already have the repo cloned locally, use local mode for speed. Use remote mode when you don't want to clone.
 
 ### Step 2: Choose the right command
 
@@ -110,7 +108,7 @@ Present findings clearly:
 The binary is a statically-compiled Rust CLI. Source at the repo root.
 
 ```
-repo-inspect --repo <path> <command> [options]
+repo-inspect --repo <repo> <command> [options]
 
 Commands:
   find-how   Search how a feature/technique is implemented
@@ -121,9 +119,10 @@ Commands:
   hotspots   Identify frequently changed or complex files
 
 Options:
-  --repo      Path to repository (default: .)
+  --repo      Repository: local path (e.g., ".") or remote GitHub (e.g., "owner/repo")
   --output    Output format: json or md (default: md)
   --out-dir   Output directory (default: .inspect)
+  --refresh   Force re-fetch remote repo, bypass 24h cache (remote mode only)
   --depth     Search depth for find-how (1-3, default: 2)
 ```
 

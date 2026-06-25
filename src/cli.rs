@@ -1,5 +1,45 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// Repository specification: either a local path or a remote GitHub repo.
+#[derive(Debug, Clone)]
+pub enum RepoSpec {
+    Local(PathBuf),
+    Remote { owner: String, repo: String },
+}
+
+impl FromStr for RepoSpec {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        // 远程仓库格式: owner/repo (不含前导 / 或 .，恰好一个斜杠)
+        let parts: Vec<&str> = s.split('/').collect();
+        if parts.len() == 2
+            && !parts[0].is_empty()
+            && !parts[1].is_empty()
+            && !parts[0].starts_with('.')
+            && !parts[1].starts_with('.')
+            && !s.starts_with('/')
+        {
+            return Ok(RepoSpec::Remote {
+                owner: parts[0].to_string(),
+                repo: parts[1].to_string(),
+            });
+        }
+        // 否则视为本地路径
+        Ok(RepoSpec::Local(PathBuf::from(s)))
+    }
+}
+
+impl std::fmt::Display for RepoSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RepoSpec::Local(p) => write!(f, "{}", p.display()),
+            RepoSpec::Remote { owner, repo } => write!(f, "{owner}/{repo}"),
+        }
+    }
+}
 
 /// Surgical codebase inspection for AI agents.
 ///
@@ -10,9 +50,9 @@ use std::path::PathBuf;
 #[derive(Parser)]
 #[command(name = "repo-inspect", version, about)]
 pub struct Args {
-    /// Path to the repository to inspect
+    /// Repository to inspect: local path (e.g., ".") or remote GitHub repo (e.g., "owner/repo")
     #[arg(short, long, default_value = ".")]
-    pub repo: PathBuf,
+    pub repo: RepoSpec,
 
     /// Output format: json (for agent consumption) or md (for human reading)
     #[arg(short, long, default_value = "md")]
@@ -21,6 +61,10 @@ pub struct Args {
     /// Output directory (default: .inspect/)
     #[arg(short = 'd', long, default_value = ".inspect")]
     pub out_dir: PathBuf,
+
+    /// Force re-fetch remote repo, bypassing local cache
+    #[arg(long)]
+    pub refresh: bool,
 
     #[command(subcommand)]
     pub command: Command,

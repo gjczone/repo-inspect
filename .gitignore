@@ -6,3 +6,4 @@
 .vscode/
 *.swp
 *.swo
+.pi/swarm/state/
