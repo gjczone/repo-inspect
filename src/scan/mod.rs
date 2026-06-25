@@ -10,9 +10,11 @@ pub mod stack;
 use anyhow::Result;
 use ignore::WalkBuilder;
 use log::debug;
+use rayon::prelude::*;
+use std::collections::HashMap;
 use std::path::Path;
 
-use parser::{ParsedFile, detect_language, parse_file};
+use parser::{CompiledQueries, ParsedFile, compile_queries, detect_language};
 
 /// 项目扫描结果。
 #[derive(Debug)]
@@ -26,8 +28,10 @@ pub struct ScanResult {
 
 /// 扫描项目，对每个支持的源文件执行 tree-sitter 解析。
 ///
-/// 复用 `ignore` crate 的 walker，尊重 `.gitignore`。
-/// 返回 `ScanResult`，包含所有提取到的符号、导入、调用。
+/// 优化策略:
+/// - 按语言预编译 Query 对象（每语言编译一次，非每文件）
+/// - 使用 rayon 并行解析文件（CPU 密集型工作完美并行）
+/// - 复用 `ignore` crate 的 walker，尊重 `.gitignore`
 pub fn scan_project(root: &Path) -> Result<ScanResult> {
     let walker = WalkBuilder::new(root)
         .hidden(false)
@@ -35,8 +39,13 @@ pub fn scan_project(root: &Path) -> Result<ScanResult> {
         .git_global(true)
         .build();
 
-    let mut files = Vec::new();
-    let mut symbol_count = 0usize;
+    // 阶段 1: 收集所有需要解析的文件路径和内容（串行 I/O）
+    let mut file_entries: Vec<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Vec<u8>,
+        parser::Language,
+    )> = Vec::new();
     let mut skipped = 0usize;
 
     for entry in walker {
@@ -47,10 +56,10 @@ pub fn scan_project(root: &Path) -> Result<ScanResult> {
 
         let abs_path = entry.path();
 
-        // 只处理支持的语言文件
-        if detect_language(abs_path).is_none() {
-            continue;
-        }
+        let lang = match detect_language(abs_path) {
+            Some(l) => l,
+            None => continue,
+        };
 
         // 跳过过大的文件 (> 500KB)，tree-sitter 解析会很慢
         if let Ok(meta) = std::fs::metadata(abs_path)
@@ -73,28 +82,45 @@ pub fn scan_project(root: &Path) -> Result<ScanResult> {
             }
         };
 
-        let rel_path = abs_path.strip_prefix(root).unwrap_or(abs_path);
-
-        match parse_file(abs_path, &source) {
-            Some(mut parsed) => {
-                // 将路径替换为相对于 root 的路径
-                parsed.path = rel_path.to_path_buf();
-                symbol_count += parsed.symbols.len();
-                debug!(
-                    "Parsed {}: {} symbols, {} imports, {} calls",
-                    rel_path.display(),
-                    parsed.symbols.len(),
-                    parsed.imports.len(),
-                    parsed.calls.len()
-                );
-                files.push(parsed);
-            }
-            None => {
-                debug!("Parse failed or unsupported: {}", rel_path.display());
-                skipped += 1;
-            }
-        }
+        let rel_path = abs_path
+            .strip_prefix(root)
+            .unwrap_or(abs_path)
+            .to_path_buf();
+        file_entries.push((abs_path.to_path_buf(), rel_path, source, lang));
     }
+
+    debug!(
+        "Scan: {} files to parse, {} skipped (size/lang)",
+        file_entries.len(),
+        skipped
+    );
+
+    // 阶段 2: 按语言预编译 Query 对象（每语言仅编译一次）
+    let compiled_queries: HashMap<parser::Language, CompiledQueries> = [
+        parser::Language::Rust,
+        parser::Language::Python,
+        parser::Language::TypeScript,
+        parser::Language::Go,
+    ]
+    .iter()
+    .filter_map(|&lang| compile_queries(lang).map(|q| (lang, q)))
+    .collect();
+
+    // 阶段 3: 并行解析（rayon 并行迭代，CPU 密集型工作）
+    let parse_results: Vec<(ParsedFile, usize)> = file_entries
+        .par_iter()
+        .filter_map(|(abs_path, rel_path, source, lang)| {
+            let queries = compiled_queries.get(lang)?;
+            let mut parsed = parser::parse_file_with_queries(abs_path, source, *lang, queries)?;
+            // 将路径替换为相对于 root 的路径
+            parsed.path = rel_path.clone();
+            let sym_count = parsed.symbols.len();
+            Some((parsed, sym_count))
+        })
+        .collect();
+
+    let symbol_count: usize = parse_results.iter().map(|(_, c)| c).sum();
+    let files: Vec<ParsedFile> = parse_results.into_iter().map(|(f, _)| f).collect();
 
     debug!(
         "Scan complete: {} files, {} symbols, {} skipped",

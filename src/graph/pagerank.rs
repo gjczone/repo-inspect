@@ -5,17 +5,28 @@
 
 use super::SymbolGraph;
 use log::debug;
+use std::collections::HashMap;
 
 /// 计算图中所有符号的 PageRank 分数。
 ///
 /// 分数直接写入每个 Symbol 的 `pagerank` 字段。
 /// 悬挂节点（无出边）的分数均匀分配给所有节点。
+///
+/// 使用 HashMap 做 symbol_id → index 映射，避免 O(S×E) 线性扫描。
+/// 参考 pi-shazam 的 Map<string, number> 实现模式。
 pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize, tol: f64) {
     let ids: Vec<String> = graph.symbols.keys().cloned().collect();
     let n = ids.len();
     if n == 0 {
         return;
     }
+
+    // symbol_id → 数组索引映射，O(1) 查找替代 ids.iter().position()
+    let id_to_idx: HashMap<&str, usize> = ids
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
 
     // 初始均匀分布
     let mut pr: Vec<f64> = vec![1.0 / n as f64; n];
@@ -33,6 +44,7 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         .collect();
 
     // 预计算入边索引: target_idx → [(source_idx, weight), ...]
+    // 使用 HashMap 映射，从 O(S×E) 降为 O(S+E)
     let mut incoming_index: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
     for (src_idx, id) in ids.iter().enumerate() {
         if out_weight_sum[src_idx] <= 0.0 {
@@ -40,7 +52,7 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         }
         if let Some(edges) = graph.outgoing.get(id) {
             for edge in edges {
-                if let Some(tgt_idx) = ids.iter().position(|i| *i == edge.target) {
+                if let Some(&tgt_idx) = id_to_idx.get(edge.target.as_str()) {
                     incoming_index[tgt_idx].push((src_idx, edge.weight));
                 }
             }
