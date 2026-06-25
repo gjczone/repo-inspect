@@ -66,13 +66,12 @@ pub fn run(args: EntriesArgs, repo: &Path, out_dir: &Path, format: OutputFormat)
             }
         }
 
-        // HTTP 路由: 扫描 calls 中的 get/post/put/delete 和 symbols 中的 route 相关
+        // HTTP 路由: 扫描 calls 中的 post/put/patch/route
+        // 注意: get/delete 太通用（Map.get, Set.delete），不作为 HTTP 入口指标
         for call in &file.calls {
             let name = call.name.to_lowercase();
-            if matches!(
-                name.as_str(),
-                "get" | "post" | "put" | "delete" | "patch" | "route"
-            ) && (kind_filter == "all" || kind_filter == "http")
+            if matches!(name.as_str(), "post" | "put" | "patch" | "route")
+                && (kind_filter == "all" || kind_filter == "http")
             {
                 entries.push(EntryPoint {
                     kind: EntryKind::Http,
@@ -84,13 +83,12 @@ pub fn run(args: EntriesArgs, repo: &Path, out_dir: &Path, format: OutputFormat)
             }
         }
 
-        // Event: .on(, .subscribe(, .addEventListener
+        // Event: .subscribe(, .addEventListener, .emit
+        // 注意: on 太通用（EventEmitter.on 等），不作为事件入口指标
         for call in &file.calls {
             let name = call.name.to_lowercase();
-            if matches!(
-                name.as_str(),
-                "on" | "subscribe" | "addeventlistener" | "emit"
-            ) && (kind_filter == "all" || kind_filter == "event")
+            if matches!(name.as_str(), "subscribe" | "addeventlistener" | "emit")
+                && (kind_filter == "all" || kind_filter == "event")
             {
                 entries.push(EntryPoint {
                     kind: EntryKind::Event,
