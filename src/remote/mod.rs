@@ -20,9 +20,11 @@
 
 use anyhow::{Context, bail};
 use log::{debug, info};
+use rayon::prelude::*;
 use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // ─── constants ──────────────────────────────────────────────────────────────
@@ -174,27 +176,40 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
-    // 5. 下载每个文件
-    let mut fetched = 0usize;
-    let mut errors = 0usize;
+    // 5. 并行下载文件（rayon 线程池，raw.githubusercontent.com 不计入 API 限额）
+    let fetched = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
 
-    for rel_path in &source_files {
-        match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
-            Ok(content) => {
-                let dest = cache_dir.join(rel_path);
-                if let Some(parent) = dest.parent() {
-                    fs::create_dir_all(parent)?;
+    // 并行下载，收集成功的结果
+    let results: Vec<(&str, String)> = source_files
+        .par_iter()
+        .filter_map(|rel_path| {
+            match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
+                Ok(content) => {
+                    fetched.fetch_add(1, Ordering::Relaxed);
+                    Some((*rel_path, content))
                 }
-                fs::write(&dest, &content)
-                    .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
-                fetched += 1;
+                Err(e) => {
+                    debug!("Failed to fetch {}: {}", rel_path, e);
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    None
+                }
             }
-            Err(e) => {
-                debug!("Failed to fetch {}: {}", rel_path, e);
-                errors += 1;
-            }
+        })
+        .collect();
+
+    // 串行写入磁盘（避免并发文件系统竞争）
+    for (rel_path, content) in &results {
+        let dest = cache_dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
         }
+        fs::write(&dest, content)
+            .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
     }
+
+    let fetched = fetched.load(Ordering::Relaxed);
+    let errors = errors.load(Ordering::Relaxed);
 
     if fetched == 0 {
         bail!(
