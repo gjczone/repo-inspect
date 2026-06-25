@@ -1,8 +1,16 @@
 # repo-inspect
 
-Surgical codebase inspection CLI — built for AI agents to quickly understand how specific features and patterns are implemented in open-source projects.
+Surgical codebase inspection for AI agents — ask "how is X implemented?" and get a compact, structured answer. No API keys, no network calls, zero cost.
 
-Instead of dumping the entire repo into an LLM's context window, `repo-inspect` surgically extracts only what you need.
+Built for the `repo-inspect` skill. The Rust binary lives in `skills/repo-inspect/scripts/repo-inspect`.
+
+## Install the Skill
+
+```bash
+npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
+```
+
+This installs the `repo-inspect` skill into your agent's skills directory. The binary (`repo-inspect`) is bundled with the skill — no separate install needed.
 
 ## Commands
 
@@ -17,7 +25,7 @@ Instead of dumping the entire repo into an LLM's context window, `repo-inspect` 
 
 ## Output
 
-Results are written to `.inspect/` (gitignored). Each query produces a single file:
+Results are written to `.inspect/` (gitignored). Each query produces a single compact file:
 
 ```
 .inspect/
@@ -38,10 +46,34 @@ repo-inspect --repo . find-how "middleware plugin" --depth 2
 # Agent reads: Read .inspect/find-how-middleware_plugin.md
 ```
 
-## Install
+## Build from Source
 
 ```bash
-cargo install --path .
+git clone https://github.com/gjczone/repo-inspect
+cd repo-inspect
+cargo build --release
+cp target/release/repo-inspect skills/repo-inspect/scripts/
 ```
 
-Or use the pre-built binary from releases.
+Requires Rust 1.85+.
+
+## Project Structure
+
+```
+repo-inspect/
+├── skills/repo-inspect/       # The skill (installed by `npx skills add`)
+│   ├── SKILL.md               # Skill definition & workflow
+│   ├── scripts/
+│   │   └── repo-inspect       # Pre-built binary (2.0 MB)
+│   └── references/
+│       └── commands.md        # Full command reference
+├── src/                       # Rust source
+│   ├── main.rs
+│   ├── cli.rs
+│   ├── commands/              # Subcommand implementations
+│   ├── search/                # File search engine (ignore crate)
+│   ├── output/                # Markdown + JSON formatting
+│   └── git/                   # Git integration (gix crate)
+├── Cargo.toml
+└── README.md
+```
