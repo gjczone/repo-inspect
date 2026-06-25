@@ -147,6 +147,7 @@ Trigger only when the task or milestone is fully completed:
 | File | When to read |
 |------|-------------|
 | `LOCAL_CI.md` | Read before every push. Run ALL checks. Failing any = broken commit. GitHub Actions (`.github/workflows/ci.yml`) is the comprehensive authority. |
+| `OPS.md` | Read before any release. Contains the exact build → bundle → tag → release workflow. NEVER guess release commands. |
 | `README.md` | User-facing reference only. NEVER duplicate its content in AGENTS.md. |
 
 ## Project Snapshot
@@ -173,13 +174,13 @@ Trigger only when the task or milestone is fully completed:
 ## Development Environment
 
 - **Rust**: 1.85+ (2024 edition). Install via `rustup`.
-- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `gix`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`
+- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`
 - **No external services**, no ports, no env vars required
 - **Clean reset**: `cargo clean && cargo build`
 
 ## Architecture
 
-Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `output` (Markdown + JSON formatting), `git` (churn analysis via `gix`).
+Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `output` (Markdown + JSON formatting), `git` (reserved for future git-based analysis).
 
 ## Core Flows
 

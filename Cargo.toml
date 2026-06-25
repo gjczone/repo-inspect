@@ -11,28 +11,19 @@ name = "repo-inspect"
 path = "src/main.rs"
 
 [dependencies]
-# CLI
 clap = { version = "4", features = ["derive"] }
-# File traversal respecting .gitignore
 ignore = "0.4"
-# Regex for content search
 regex = "1"
-# JSON output
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Git integration (pure Rust)
-gix = "0.70"
-# Walk directory
 walkdir = "2"
-# Error handling
 anyhow = "1"
 thiserror = "2"
-# Logging
 log = "0.4"
 env_logger = "0.11"
 
 [profile.release]
-opt-level = "z"     # Optimize for size
-lto = true          # Link-time optimization
-strip = true        # Strip symbols
-codegen-units = 1   # Better optimization
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1
