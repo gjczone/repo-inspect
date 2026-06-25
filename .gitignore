@@ -1,0 +1,8 @@
+/target
+.inspect/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
