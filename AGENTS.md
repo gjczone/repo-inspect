@@ -142,22 +142,35 @@ Trigger only when the task or milestone is fully completed:
 
 <general-project-rules>
 
-## When to Read Companion Files
+## When to Read Rules Files
 
-| File | When to read |
-|------|-------------|
-| `LOCAL_CI.md` | Read before every push. Run ALL checks. Failing any = broken commit. GitHub Actions (`.github/workflows/ci.yml`) is the comprehensive authority. |
-| `OPS.md` | Read before any release. Contains the exact build → bundle → tag → release workflow. NEVER guess release commands. |
-| `README.md` | User-facing reference only. NEVER duplicate its content in AGENTS.md. |
+- Read `rules/LOCAL_CI.md` before every push. Run ALL checks. Failing any = broken commit. GitHub Actions (`.github/workflows/ci.yml`) is the comprehensive authority.
+- Read `rules/OPS.md` before any release. Contains build → bundle → tag → release procedures.
+- Read `rules/LLM-REVIEW-GUIDE.md` before performing a code review on this project.
+- Read `rules/CODING.md` before writing or modifying code.
+- Read `rules/TESTING.md` before writing or modifying tests.
+- Read `rules/DEBUGGING.md` before debugging issues.
+- Read `rules/API-RULES.md` before designing or modifying CLI flags or output formats.
+- Read `rules/DATA-STATE.md` before working with data, cache, or file persistence.
+- Read `rules/VERIFICATION.md` before marking work complete.
+- Read `rules/ERROR-HANDLING.md` before handling errors or boundary cases.
+- Read `rules/LOGGING.md` before adding logs or debugging output.
+- Read `rules/SECURITY.md` before handling authentication, tokens, or security-sensitive code.
+- Read `rules/DEPENDENCIES.md` before adding, updating, or removing dependencies.
+- Read `rules/ARCHITECTURE.md` before making architectural decisions.
+- Read `rules/PERFORMANCE.md` before optimizing performance or profiling.
+- Read `README.md` for user-facing reference only. NEVER duplicate its content in AGENTS.md.
+- Read `OPS.md` for the full 7-phase release workflow. NEVER guess release commands.
 
 ## Project Snapshot
 
 - **repo-inspect**: surgical codebase inspection CLI — ask "how is X implemented?" and get compact, structured output
 - **Language**: Rust 2024 edition (1.85+)
-- **Output**: single binary (`repo-inspect`), 2.0 MB stripped release build
+- **Output**: single binary (`repo-inspect`), ~5.5 MB stripped release build
 - **Deployment**: bundled inside `skills/repo-inspect/scripts/` for distribution via `npx skills add`
-- **Key boundary**: the binary reads files locally (respects `.gitignore`), writes to `.inspect/` — zero network calls, zero API keys
-- **Risk areas**: file I/O on large repos, `ignore` crate traversal, CLI argument parsing edge cases
+- **Key boundary**: the binary reads files locally (respects `.gitignore`) or fetches from GitHub API (remote mode via `--repo owner/repo`), writes to `.inspect/`
+- **Network**: local mode = zero network; remote mode = GitHub API only (tree + raw file fetch)
+- **Risk areas**: file I/O on large repos, `ignore` crate traversal, CLI argument parsing edge cases, GitHub API rate limiting
 
 ## Commands
 
@@ -174,8 +187,8 @@ Trigger only when the task or milestone is fully completed:
 ## Development Environment
 
 - **Rust**: 1.85+ (2024 edition). Install via `rustup`.
-- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`
-- **No external services**, no ports, no env vars required
+- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`, `minreq` (sync HTTP), `tree-sitter` + grammars
+- **No external services**, no ports, no env vars required (optional `GITHUB_TOKEN` for remote mode)
 - **Clean reset**: `cargo clean && cargo build`
 
 ## Architecture
@@ -185,8 +198,9 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 ## Core Flows
 
 1. **find-how**: CLI args → `FileFinder::walk()` (respects `.gitignore`) → keyword scoring → `extract_matching_lines()` → `OutputWriter::write_markdown()` → `.inspect/` file
-2. **Skill usage**: Agent spawns subagent → subagent runs `scripts/repo-inspect find-how "query"` → binary writes `.inspect/` → main agent reads `.inspect/` file
-3. **Build & bundle**: `cargo build --release` → `cp target/release/repo-inspect skills/repo-inspect/scripts/` → commit
+2. **Remote mode**: `--repo owner/repo` → `remote::prepare()` → GitHub API tree fetch → raw file download → cache → then same local analysis pipeline
+3. **Skill usage**: Agent spawns subagent → subagent runs `scripts/repo-inspect find-how "query"` → binary writes `.inspect/` → main agent reads `.inspect/` file
+4. **Build & bundle**: `cargo build --release` → `cp target/release/repo-inspect skills/repo-inspect/scripts/` → commit
 
 ## Change Map
 
@@ -197,6 +211,7 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | Change output format | `src/output/mod.rs` | Check `.inspect/` output files |
 | Update CLI args | `src/cli.rs` | `cargo run -- --help` |
 | Update dependencies | `Cargo.toml` | `cargo build --release` + binary size check |
+| Modify remote mode | `src/remote/mod.rs` | `--repo gjczone/repo-inspect find-how "test"` (cached + fresh) |
 
 ## Verification Matrix
 
@@ -206,8 +221,9 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | Clippy | `cargo clippy -- -D warnings` | Exit 0, zero warnings |
 | Build | `cargo build --release` | Exit 0 |
 | Test | `cargo test` | Exit 0, 0 failed |
-| Binary size | `ls -lh target/release/repo-inspect` | < 5 MB |
+| Binary size | `ls -lh target/release/repo-inspect` | < 6 MB |
 | find-how smoke | `cargo run -- --repo . find-how "test" --depth 1` | Exit 0, output in `.inspect/` |
+| Remote smoke | `./target/release/repo-inspect --repo gjczone/repo-inspect find-how "test"` | Exit 0 (requires GITHUB_TOKEN) |
 
 ## First Places to Inspect
 
@@ -218,59 +234,44 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | "How is output formatted?" | `src/output/mod.rs` |
 | "How does file search work?" | `src/search/mod.rs` |
 | "How is the skill structured?" | `skills/repo-inspect/SKILL.md` |
+| "How does remote mode work?" | `src/remote/mod.rs` (prepare, fetch_tree, fetch_raw_file, caching) |
 
 ## Coding Rules
 
-- **NEVER** add a new dependency without explicit justification in the PR body.
-- **NEVER** merge a PR that doesn't pass `cargo fmt --check && cargo clippy -- -D warnings`.
-- **NEVER** leave an `unwrap()` or `expect()` on a fallible operation that can fail under normal use — use `?` with `anyhow::Result`.
-- **NEVER** add a subcommand stub that panics or silently does nothing — implement it or leave it out.
-- **NEVER** modify the CLI interface (`src/cli.rs`) without updating `skills/repo-inspect/references/commands.md`.
+See `rules/CODING.md`. Key anchors: NEVER add deps without justification. NEVER leave `unwrap()` on fallible ops. CLI interface IS the API — never break backward compat.
 
 ## Testing Rules
 
-- **NEVER** merge a PR without a test for the new/changed behavior. One test per subcommand is the minimum.
-- **NEVER** skip `cargo test` before pushing — all tests MUST pass.
-- **NEVER** write a test that depends on a specific real repository being present — use the current project itself (`--repo .`) as test data.
-- Smoke test for every subcommand: run against `--repo .` and verify exit code 0.
+See `rules/TESTING.md`. Key anchors: one test per subcommand minimum. Use `--repo .` as test data. Smoke test every subcommand.
 
 ## Debugging Rules
 
-- **NEVER** leave `eprintln!` debug output in committed code — use `log` crate macros (`info!`, `debug!`, `error!`).
-- Run with `RUST_LOG=debug repo-inspect ...` to enable verbose output.
-- Binary writes non-zero exit codes on failure — check stderr for the `anyhow` error chain.
+See `rules/DEBUGGING.md`. Key anchors: use `log` crate, not `eprintln!`. Run with `RUST_LOG=debug`. Check stderr for anyhow error chain.
 
 ## API Rules
 
-- The CLI interface IS the API. **NEVER** change a command name, flag, or output format without backward compatibility or a major version bump.
-- Output filenames follow the pattern `<command>-<sanitized-query>.<ext>`. **NEVER** change the sanitization logic without updating consumers.
-- `--output json` mode MUST produce valid JSON matching the `FindHowOutput` struct shape.
+See `rules/API-RULES.md`. Key anchors: CLI = API. Output filenames: `<command>-<sanitized-query>.<ext>`. `--output json` must be valid.
 
 ## Data & State Rules
 
-- The binary is stateless. **NEVER** introduce persistent state that survives between invocations.
-- `.inspect/` is the only output directory. **NEVER** write files outside `.inspect/`.
-- **NEVER** read files outside the `--repo` directory (except `.gitignore` rules).
+See `rules/DATA-STATE.md`. Key anchors: binary is stateless. `.inspect/` output only. Remote cache: `~/.cache/repo-inspect/remote/`.
 
 ## Verification Before Completion
 
-- [ ] `cargo fmt --check` passes
-- [ ] `cargo clippy -- -D warnings` passes
-- [ ] `cargo build --release` succeeds
-- [ ] `cargo test` passes — 0 failures
-- [ ] Binary updated: `cp target/release/repo-inspect skills/repo-inspect/scripts/`
-- [ ] Manual smoke test: `./skills/repo-inspect/scripts/repo-inspect --repo . find-how "search" --depth 1` exits 0
-- [ ] `skills/repo-inspect/references/commands.md` matches current CLI
+See `rules/VERIFICATION.md`. Run ALL checks: `cargo fmt --check && cargo clippy -- -D warnings && cargo build --release && cargo test` + smoke + binary update + docs sync.
 
 ## Agent Checklist
 
-- [ ] Read `LOCAL_CI.md` before every push — run ALL checks
-- [ ] Address user as 老板 in completion reports
-- [ ] Completion report format: 做了什么 / 结果 / 已确认 / 需要你决策 / 待跟进
+- [ ] Read `rules/LOCAL_CI.md` before every push — run ALL checks
+- [ ] Read `rules/VERIFICATION.md` before marking work complete
+- [ ] Read `rules/CODING.md` before writing code
+- [ ] Read `rules/DEPENDENCIES.md` before adding/updating deps
+- [ ] Address user as 老板 — user-system-rules.md
+- [ ] Completion report format: 做了什么 / 结果 / 已确认 / 需要你决策 / 待跟进 — user-system-rules.md
 - [ ] NEVER skip `cargo fmt --check && cargo clippy -- -D warnings` before commit
 - [ ] NEVER leave `unwrap()` on fallible operations in production code paths
-- [ ] Update bundled binary after every feature change that modifies the binary
+- [ ] Update bundled binary after every feature change: `cp target/release/repo-inspect skills/repo-inspect/scripts/`
+- [ ] Every new subcommand: implementation + smoke test + entry in `skills/repo-inspect/references/commands.md`
 - [ ] `git status --porcelain` returns empty before marking task complete
-- [ ] Every new subcommand has: implementation + smoke test + entry in references/commands.md
 
 </general-project-rules>
