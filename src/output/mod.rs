@@ -1,4 +1,5 @@
 use crate::cli::OutputFormat;
+use crate::scan::parser::{self, ExtractedSymbol};
 use crate::search::FileMatch;
 use anyhow::Result;
 use serde::Serialize;
@@ -6,12 +7,37 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Structured output for JSON format
+/// L1 文本搜索 JSON 输出
 #[derive(Serialize)]
 struct FindHowOutput {
     query: String,
     files_found: usize,
     results: Vec<FileResult>,
+}
+
+/// L2 符号搜索 JSON 输出
+#[derive(Serialize)]
+struct SymbolFindHowOutput {
+    query: String,
+    definitions: Vec<SymbolEntry>,
+    call_references: Vec<CallEntry>,
+}
+
+#[derive(Serialize)]
+struct SymbolEntry {
+    name: String,
+    kind: String,
+    file: String,
+    line: usize,
+    end_line: usize,
+    signature: String,
+}
+
+#[derive(Serialize)]
+struct CallEntry {
+    name: String,
+    file: String,
+    line: usize,
 }
 
 #[derive(Serialize)]
@@ -41,12 +67,7 @@ impl OutputWriter {
     ///
     /// Creates `.inspect/` directory if it doesn't exist.
     /// Output file: `.inspect/{command}-{sanitized_query}.{ext}`
-    pub fn new(
-        out_dir: &Path,
-        command: &str,
-        query: &str,
-        format: OutputFormat,
-    ) -> Result<Self> {
+    pub fn new(out_dir: &Path, command: &str, query: &str, format: OutputFormat) -> Result<Self> {
         fs::create_dir_all(out_dir)?;
 
         let sanitized = sanitize_filename(query);
@@ -64,11 +85,28 @@ impl OutputWriter {
         })
     }
 
+    /// 获取输出文件路径。
+    pub fn output_file(&self) -> &Path {
+        &self.output_file
+    }
+
     /// Write inspection results in the configured format
     pub fn write_results(&mut self, matches: &[FileMatch]) -> Result<()> {
         match self.format {
             OutputFormat::Json => self.write_json(matches),
             OutputFormat::Md => self.write_markdown(matches),
+        }
+    }
+
+    /// Write L2 符号搜索结果：区分定义和调用引用。
+    pub fn write_symbol_results(
+        &mut self,
+        definitions: &[(&Path, &ExtractedSymbol)],
+        call_refs: &[(&Path, &parser::CallRef)],
+    ) -> Result<()> {
+        match self.format {
+            OutputFormat::Json => self.write_symbol_json(definitions, call_refs),
+            OutputFormat::Md => self.write_symbol_markdown(definitions, call_refs),
         }
     }
 
@@ -164,6 +202,111 @@ impl OutputWriter {
                     writeln!(f, "L{}: `{}`  ", ml.line_number, ml.content.trim())?;
                 }
                 writeln!(f)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn write_symbol_json(
+        &mut self,
+        definitions: &[(&Path, &ExtractedSymbol)],
+        call_refs: &[(&Path, &parser::CallRef)],
+    ) -> Result<()> {
+        let query = self
+            .output_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("unknown");
+
+        let output = SymbolFindHowOutput {
+            query: query.to_string(),
+            definitions: definitions
+                .iter()
+                .map(|(path, sym)| SymbolEntry {
+                    name: sym.name.clone(),
+                    kind: format!("{:?}", sym.kind).to_lowercase(),
+                    file: path.to_string_lossy().to_string(),
+                    line: sym.line,
+                    end_line: sym.end_line,
+                    signature: sym.signature.clone(),
+                })
+                .collect(),
+            call_references: call_refs
+                .iter()
+                .map(|(path, call)| CallEntry {
+                    name: call.name.clone(),
+                    file: path.to_string_lossy().to_string(),
+                    line: call.line,
+                })
+                .collect(),
+        };
+
+        let json = serde_json::to_string_pretty(&output)?;
+        fs::write(&self.output_file, json)?;
+        Ok(())
+    }
+
+    fn write_symbol_markdown(
+        &self,
+        definitions: &[(&Path, &ExtractedSymbol)],
+        call_refs: &[(&Path, &parser::CallRef)],
+    ) -> Result<()> {
+        let mut f = fs::File::create(&self.output_file)?;
+        let query = self
+            .output_file
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("inspection");
+
+        writeln!(f, "# Inspection: {}", query)?;
+        writeln!(f)?;
+
+        // 定义
+        writeln!(f, "## Symbol Definitions ({})  ", definitions.len())?;
+        writeln!(f)?;
+        if definitions.is_empty() {
+            writeln!(f, "_No symbol definitions matched._  ")?;
+        }
+        for (path, sym) in definitions {
+            writeln!(
+                f,
+                "- **{}** `{}` — {}:{}  ",
+                sym.kind.label(),
+                sym.name,
+                path.display(),
+                sym.line
+            )?;
+            // 签名预览
+            let sig_trimmed = sym.signature.trim();
+            if !sig_trimmed.is_empty() {
+                writeln!(f, "  `{}`  ", sig_trimmed)?;
+            }
+        }
+        writeln!(f)?;
+
+        // 调用引用
+        writeln!(f, "## Call References ({})  ", call_refs.len())?;
+        writeln!(f)?;
+        if call_refs.is_empty() {
+            writeln!(f, "_No call references found._  ")?;
+        }
+        // 按文件分组
+        let mut by_file: std::collections::BTreeMap<String, Vec<&parser::CallRef>> =
+            std::collections::BTreeMap::new();
+        for (path, call) in call_refs {
+            by_file
+                .entry(path.to_string_lossy().to_string())
+                .or_default()
+                .push(call);
+        }
+        for (file, calls) in &by_file {
+            writeln!(f, "### {}  ", file)?;
+            for call in calls.iter().take(20) {
+                writeln!(f, "- L{}: `{}`  ", call.line, call.name)?;
+            }
+            if calls.len() > 20 {
+                writeln!(f, "- _... and {} more_  ", calls.len() - 20)?;
             }
         }
 

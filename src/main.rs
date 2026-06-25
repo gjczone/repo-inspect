@@ -1,7 +1,10 @@
 mod cli;
 mod commands;
 mod git;
+#[allow(dead_code)]
+mod graph;
 mod output;
+mod scan;
 mod search;
 
 use anyhow::Result;
@@ -19,10 +22,10 @@ fn main() -> Result<()> {
 
     match args.command {
         cli::Command::FindHow(cmd) => commands::find_how::run(cmd, &repo, &out_dir, format),
-        cli::Command::Trace(cmd) => commands::trace::run(cmd),
-        cli::Command::Entries(cmd) => commands::entries::run(cmd),
-        cli::Command::Patterns(cmd) => commands::patterns::run(cmd),
-        cli::Command::Data(cmd) => commands::data::run(cmd),
-        cli::Command::Hotspots(cmd) => commands::hotspots::run(cmd),
+        cli::Command::Trace(cmd) => commands::trace::run(cmd, &repo, &out_dir, format),
+        cli::Command::Entries(cmd) => commands::entries::run(cmd, &repo, &out_dir, format),
+        cli::Command::Patterns(cmd) => commands::patterns::run(cmd, &repo, &out_dir, format),
+        cli::Command::Data(cmd) => commands::data::run(cmd, &repo, &out_dir, format),
+        cli::Command::Hotspots(cmd) => commands::hotspots::run(cmd, &repo, &out_dir, format),
     }
 }

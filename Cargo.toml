@@ -22,6 +22,13 @@ thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
 
+# Tree-sitter (L2)
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-typescript = "0.23"
+tree-sitter-go = "0.25"
+
 [profile.release]
 opt-level = "z"
 lto = true

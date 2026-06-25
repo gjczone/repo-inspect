@@ -88,7 +88,7 @@ pub struct HotspotsArgs {
     pub count: usize,
 }
 
-#[derive(clap::ValueEnum, Clone)]
+#[derive(clap::ValueEnum, Clone, Copy)]
 pub enum OutputFormat {
     Json,
     Md,

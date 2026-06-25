@@ -41,10 +41,13 @@ impl FileFinder {
 
         for entry in walker {
             let entry = entry?;
-            if !entry.file_type().map_or(false, |t| t.is_file()) {
+            if !entry.file_type().is_some_and(|t| t.is_file()) {
                 continue;
             }
-            let path = entry.path().strip_prefix(&self.root).unwrap_or(entry.path());
+            let path = entry
+                .path()
+                .strip_prefix(&self.root)
+                .unwrap_or(entry.path());
             if is_source_file(path) {
                 files.push(self.root.join(path));
             }
@@ -76,15 +79,12 @@ impl FileFinder {
                 .map(|n| n.to_string_lossy().to_lowercase())
                 .unwrap_or_default();
 
-            let rel_path = full_path
-                .strip_prefix(&self.root)
-                .unwrap_or(full_path);
+            let rel_path = full_path.strip_prefix(&self.root).unwrap_or(full_path);
 
             // Score: file name match × 3 + content match count
             let name_score = terms.iter().filter(|t| file_name.contains(*t)).count() as f64 * 3.0;
             let content_lower = content.to_lowercase();
-            let content_score =
-                terms.iter().filter(|t| content_lower.contains(*t)).count() as f64;
+            let content_score = terms.iter().filter(|t| content_lower.contains(*t)).count() as f64;
 
             let total_score = name_score + content_score;
             if total_score > 0.0 {
@@ -118,15 +118,45 @@ fn is_source_file(path: &Path) -> bool {
         return false;
     }
 
-    match path.extension().and_then(|e| e.to_str()) {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
         Some(
-            "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "java" | "c" | "cpp" | "h"
-            | "hpp" | "rb" | "php" | "swift" | "kt" | "scala" | "cs" | "fs" | "vue"
-            | "svelte" | "json" | "yaml" | "yml" | "toml" | "md" | "css" | "scss" | "less"
-            | "html" | "xml" | "sql" | "graphql" | "proto" | "prisma",
-        ) => true,
-        _ => false,
-    }
+            "rs" | "py"
+                | "js"
+                | "ts"
+                | "tsx"
+                | "jsx"
+                | "go"
+                | "java"
+                | "c"
+                | "cpp"
+                | "h"
+                | "hpp"
+                | "rb"
+                | "php"
+                | "swift"
+                | "kt"
+                | "scala"
+                | "cs"
+                | "fs"
+                | "vue"
+                | "svelte"
+                | "json"
+                | "yaml"
+                | "yml"
+                | "toml"
+                | "md"
+                | "css"
+                | "scss"
+                | "less"
+                | "html"
+                | "xml"
+                | "sql"
+                | "graphql"
+                | "proto"
+                | "prisma",
+        )
+    )
 }
 
 /// Extract lines from content that match search terms, with ±2 lines context
