@@ -4,7 +4,8 @@
 
 - **Cold start**: Binary loads in < 100ms (stripped release build)
 - **File traversal**: Limited by `ignore` crate walk speed (I/O bound)
-- **Remote mode**: Latency dominated by GitHub API + network; files downloaded sequentially
+- **Remote mode**: Latency dominated by GitHub API + network; files downloaded in parallel via rayon
+- **Scan pipeline**: 3-phase — serial I/O → query compilation → parallel parse (rayon)
 - **Memory**: Proportional to cached file count + symbol graph size
 
 ## Binary Size
@@ -22,9 +23,9 @@ $ ls -lh target/release/repo-inspect
 | Area | Risk | Mitigation |
 |------|------|------------|
 | `search::FileFinder::walk()` | Large repos (>10k files) | `.gitignore` skipping, `MAX_FILES = 5000` cap |
-| `remote::fetch_raw_file()` | Many files, sequential HTTP | Downloaded one-by-one; raw.githubusercontent.com (no rate limit) |
-| `scan::parser` | Tree-sitter parsing per file | Lazy; only files matching query |
-| `graph::pagerank` | Dense symbol graphs | Bounded iteration count |
+| `remote::fetch_raw_file()` | Many files, sequential HTTP | Parallel downloads via rayon; raw.githubusercontent.com (no rate limit) |
+| `scan::parser` | Tree-sitter parsing per file | `CompiledQueries` caches compiled queries once; rayon parallel parse across files |
+| `graph::pagerank` | Dense symbol graphs | `HashMap` for O(1) node index lookup; bounded iteration count |
 
 ## Remote Mode Performance
 
@@ -35,7 +36,9 @@ $ ls -lh target/release/repo-inspect
 ## Optimization Rules
 
 - **NEVER** optimize without profiling first. The binary is already fast enough for its use case.
-- If remote mode is slow: parallelize file downloads (but keep it synchronous — no tokio).
+- Remote downloads use rayon `par_iter()` — synchronous I/O per thread, no async runtime needed.
+- Symbol graph uses `HashMap` for O(1) index lookup during PageRank computation.
+- Scan pipeline compiles tree-sitter queries once (`CompiledQueries`), then parallelizes parse across files.
 - If symbol graph is large: add depth limits to traversal.
 - If binary size grows: check for duplicate dependencies via `cargo bloat`.
 

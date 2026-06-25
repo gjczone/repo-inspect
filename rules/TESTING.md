@@ -13,6 +13,8 @@ Rust tests via `cargo test`. All rules come from evidence in the repository.
 ## Test Discipline
 
 - **NEVER** merge a PR without a test for the new/changed behavior. One test per subcommand is the minimum.
+- Current test count: 45 tests. All must pass before push.
+- Tests use `parse_file` convenience wrapper (compiles queries internally). Production code uses `parse_file_with_queries` with pre-compiled `CompiledQueries` for performance.
 - **NEVER** skip `cargo test` before pushing — all tests MUST pass.
 - **NEVER** write a test that depends on a specific real repository being present — use the current project itself (`--repo .`) as test data.
 - Smoke test for every subcommand: run against `--repo .` and verify exit code 0.

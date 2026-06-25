@@ -170,7 +170,7 @@ Trigger only when the task or milestone is fully completed:
 - **Deployment**: bundled inside `skills/repo-inspect/scripts/` for distribution via `npx skills add`
 - **Key boundary**: the binary reads files locally (respects `.gitignore`) or fetches from GitHub API (remote mode via `--repo owner/repo`), writes to `.inspect/`
 - **Network**: local mode = zero network; remote mode = GitHub API only (tree + raw file fetch)
-- **Risk areas**: file I/O on large repos, `ignore` crate traversal, CLI argument parsing edge cases, GitHub API rate limiting
+- **Risk areas**: file I/O on large repos, `ignore` crate traversal, CLI argument parsing edge cases, GitHub API rate limiting, rayon parallel panics / thread-safety in scan pipeline
 
 ## Commands
 
@@ -184,21 +184,29 @@ Trigger only when the task or milestone is fully completed:
 | `cargo run -- --repo <path> <command> <args>` | Run locally for testing |
 | `cp target/release/repo-inspect skills/repo-inspect/scripts/` | Update bundled binary after build |
 
+### CLI Subcommand Flags
+
+| Subcommand | Flag | Default | Description |
+|------------|------|---------|-------------|
+| `trace` | `--depth` | 2 | Max call-chain depth to trace |
+| `trace` | `--limit` | 100 | Max results to return |
+| `data` | `--limit` | 50 | Max data entries to return |
+
 ## Development Environment
 
 - **Rust**: 1.85+ (2024 edition). Install via `rustup`.
-- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`, `minreq` (sync HTTP), `tree-sitter` + grammars
+- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`, `minreq` (sync HTTP), `tree-sitter` + grammars, `rayon` (parallel scan + remote downloads)
 - **No external services**, no ports, no env vars required (optional `GITHUB_TOKEN` for remote mode)
 - **Clean reset**: `cargo clean && cargo build`
 
 ## Architecture
 
-Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `output` (Markdown + JSON formatting), `git` (reserved for future git-based analysis).
+Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `scan` (3-phase tree-sitter pipeline with `CompiledQueries` caching in `scan/parser.rs` — serial I/O → per-language Query compilation → rayon parallel parsing), `output` (Markdown + JSON formatting), `remote` (parallel file downloads via rayon `par_iter` on `raw.githubusercontent.com`), `git` (reserved for future git-based analysis).
 
 ## Core Flows
 
-1. **find-how**: CLI args → `FileFinder::walk()` (respects `.gitignore`) → keyword scoring → `extract_matching_lines()` → `OutputWriter::write_markdown()` → `.inspect/` file
-2. **Remote mode**: `--repo owner/repo` → `remote::prepare()` → GitHub API tree fetch → raw file download → cache → then same local analysis pipeline
+1. **find-how**: CLI args → `FileFinder::walk()` (respects `.gitignore`) → keyword scoring → 3-phase scan pipeline (serial I/O collection → per-language `CompiledQueries` compilation → rayon parallel tree-sitter parsing) → `extract_matching_lines()` → `OutputWriter::write_markdown()` → `.inspect/` file
+2. **Remote mode**: `--repo owner/repo` → `remote::prepare()` → GitHub API tree fetch → rayon `par_iter` parallel raw file downloads via `raw.githubusercontent.com` → cache → then same local analysis pipeline
 3. **Skill usage**: Agent spawns subagent → subagent runs `scripts/repo-inspect find-how "query"` → binary writes `.inspect/` → main agent reads `.inspect/` file
 4. **Build & bundle**: `cargo build --release` → `cp target/release/repo-inspect skills/repo-inspect/scripts/` → commit
 
@@ -235,6 +243,7 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | "How does file search work?" | `src/search/mod.rs` |
 | "How is the skill structured?" | `skills/repo-inspect/SKILL.md` |
 | "How does remote mode work?" | `src/remote/mod.rs` (prepare, fetch_tree, fetch_raw_file, caching) |
+| "How does scan/parsing work?" | `src/scan/parser.rs` (CompiledQueries, 3-phase pipeline) |
 
 ## Coding Rules
 
@@ -250,7 +259,7 @@ See `rules/DEBUGGING.md`. Key anchors: use `log` crate, not `eprintln!`. Run wit
 
 ## API Rules
 
-See `rules/API-RULES.md`. Key anchors: CLI = API. Output filenames: `<command>-<sanitized-query>.<ext>`. `--output json` must be valid.
+See `rules/API-RULES.md`. Key anchors: CLI = API. Output filenames: `<command>.md` when no filter (e.g. `entries.md`, `hotspots.md`, `data.md`, `patterns.md`); `<command>-<sanitized-filter>.md` with filter (e.g. `data-RepoSpec.md`, `patterns-concurrency.md`). `--output json` must be valid. `out_dir` resolves relative to repo dir (not cwd) by default.
 
 ## Data & State Rules
 

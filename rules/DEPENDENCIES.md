@@ -19,6 +19,7 @@
 | `thiserror` | 2 | Library error types | Low |
 | `log` / `env_logger` | 0.4 / 0.11 | Logging | Low |
 | `minreq` | 2 | Sync HTTP client | Medium |
+| `rayon` | 1 | Parallel iteration (scan + remote downloads) | Low |
 | `tree-sitter` + 4 grammars | Various | AST parsing | Medium |
 
 ## Adding a Dependency

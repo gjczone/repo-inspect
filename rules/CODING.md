@@ -20,6 +20,19 @@ Rust 2024 edition. All rules come from evidence in the repository.
 - Use `anyhow::Result` for application-level errors, `thiserror` for library-level structured errors.
 - **NEVER** leave an `unwrap()` or `expect()` on a fallible operation that can fail under normal use — use `?` with `anyhow::Result`.
 
+## Parallelism (rayon)
+
+- Use `par_iter()` for CPU-bound parallel work (tree-sitter parsing, remote file downloads).
+- Use `AtomicUsize` for lock-free counters in parallel contexts (e.g., progress tracking).
+- **NEVER** hold a `Mutex` across a `par_iter()` — prefer atomics or collect-then-merge.
+- Scan pipeline: serial I/O phase collects files, then rayon parallelizes the parse phase.
+
+## Query Caching (CompiledQueries)
+
+- `CompiledQueries` pre-compiles tree-sitter `Query` objects once, then reuses them across all files.
+- **NEVER** call `tree_sitter::Query::new()` inside a per-file loop — compile once, pass as reference.
+- Pattern: build `CompiledQueries` at scan start → pass `&CompiledQueries` into parallel parse workers.
+
 ## Dependencies
 
 - **NEVER** add a new dependency without explicit justification in the PR body.

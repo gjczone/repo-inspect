@@ -40,10 +40,10 @@
 | `commands/patterns` | Design pattern heuristic detection |
 | `commands/data` | Data structure / type definition extraction |
 | `commands/hotspots` | Git history → change frequency ranking |
-| `remote` | GitHub API: tree fetch, raw download, cache management |
+| `remote` | GitHub API: tree fetch, parallel raw download (rayon), cache management |
 | `search` | `.gitignore`-aware file walk + content grep |
 | `output` | Markdown / JSON formatting + `.inspect/` write |
-| `scan` | Tree-sitter parsing + symbol extraction |
+| `scan` | 3-phase pipeline: serial I/O → `CompiledQueries` compilation → parallel parse (rayon) |
 | `graph` | Symbol graph: builder + PageRank + traversal |
 
 ## File Count Rule
