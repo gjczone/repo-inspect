@@ -102,6 +102,12 @@ pub struct TraceArgs {
     /// Direction: callers (who calls this), callees (what this calls), or both
     #[arg(short, long, default_value = "both")]
     pub direction: TraceDirection,
+    /// Trace depth: 1 = direct only, 2 = + indirect (default), 3 = full chain
+    #[arg(long, default_value = "2")]
+    pub depth: usize,
+    /// Maximum entries per direction (callers/callees each)
+    #[arg(short, long, default_value = "100")]
+    pub limit: usize,
 }
 
 #[derive(clap::Args)]
@@ -123,6 +129,9 @@ pub struct DataArgs {
     /// Filter to a specific type/module name
     #[arg(short, long)]
     pub name: Option<String>,
+    /// Maximum number of type definitions to return
+    #[arg(short, long, default_value = "50")]
+    pub limit: usize,
 }
 
 #[derive(clap::Args)]

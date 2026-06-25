@@ -29,18 +29,25 @@ pub fn run(args: TraceArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -
         return Ok(());
     }
 
-    let max_depth = 3;
+    let max_depth = args.depth;
+    let limit = args.limit;
 
     match format {
-        OutputFormat::Json => {
-            write_trace_json(&mut writer, &graph, &symbols, &args.direction, max_depth)?
-        }
+        OutputFormat::Json => write_trace_json(
+            &mut writer,
+            &graph,
+            &symbols,
+            &args.direction,
+            max_depth,
+            limit,
+        )?,
         OutputFormat::Md => write_trace_markdown(
             &mut writer,
             &graph,
             &symbols,
             &args.direction,
             max_depth,
+            limit,
             &stack,
         )?,
     }
@@ -61,6 +68,7 @@ fn write_trace_markdown(
     symbols: &[&graph::Symbol],
     direction: &TraceDirection,
     max_depth: usize,
+    limit: usize,
     stack: &scan::stack::ProjectStack,
 ) -> Result<()> {
     let path = writer.output_file();
@@ -87,9 +95,17 @@ fn write_trace_markdown(
         // Callers
         if matches!(direction, TraceDirection::Callers | TraceDirection::Both) {
             let callers = graph::traverse::trace_callers(graph, &sym.id, max_depth);
-            writeln!(f, "### ← Callers ({})", callers.len())?;
+            let total = callers.len();
+            writeln!(f, "### ← Callers ({})", total)?;
+            if total > limit {
+                writeln!(
+                    f,
+                    "_Showing top {} of {} — use `--limit` to see more_  ",
+                    limit, total
+                )?;
+            }
             writeln!(f)?;
-            for entry in &callers {
+            for entry in callers.iter().take(limit) {
                 if let Some(s) = graph.symbols.get(&entry.symbol_id) {
                     writeln!(
                         f,
@@ -107,9 +123,17 @@ fn write_trace_markdown(
         // Callees
         if matches!(direction, TraceDirection::Callees | TraceDirection::Both) {
             let callees = graph::traverse::trace_callees(graph, &sym.id, max_depth);
-            writeln!(f, "### → Callees ({})", callees.len())?;
+            let total = callees.len();
+            writeln!(f, "### → Callees ({})", total)?;
+            if total > limit {
+                writeln!(
+                    f,
+                    "_Showing top {} of {} — use `--limit` to see more_  ",
+                    limit, total
+                )?;
+            }
             writeln!(f)?;
-            for entry in &callees {
+            for entry in callees.iter().take(limit) {
                 if let Some(s) = graph.symbols.get(&entry.symbol_id) {
                     writeln!(
                         f,
@@ -134,6 +158,7 @@ fn write_trace_json(
     symbols: &[&graph::Symbol],
     direction: &TraceDirection,
     max_depth: usize,
+    limit: usize,
 ) -> Result<()> {
     use serde::Serialize;
 
@@ -162,6 +187,7 @@ fn write_trace_json(
         let callers = if matches!(direction, TraceDirection::Callers | TraceDirection::Both) {
             graph::traverse::trace_callers(graph, &sym.id, max_depth)
                 .iter()
+                .take(limit)
                 .filter_map(|e| {
                     graph.symbols.get(&e.symbol_id).map(|s| TraceEntryJson {
                         name: s.name.clone(),
@@ -178,6 +204,7 @@ fn write_trace_json(
         let callees = if matches!(direction, TraceDirection::Callees | TraceDirection::Both) {
             graph::traverse::trace_callees(graph, &sym.id, max_depth)
                 .iter()
+                .take(limit)
                 .filter_map(|e| {
                     graph.symbols.get(&e.symbol_id).map(|s| TraceEntryJson {
                         name: s.name.clone(),

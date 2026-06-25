@@ -48,13 +48,20 @@ pub fn run(args: DataArgs, repo: &Path, out_dir: &Path, format: OutputFormat) ->
         }
     }
 
+    let total = types.len();
+    // 按发现顺序截断到 limit — 大仓库避免输出过大
+    if types.len() > args.limit {
+        types.truncate(args.limit);
+    }
+
     match format {
         OutputFormat::Json => write_json(&writer, &types)?,
-        OutputFormat::Md => write_markdown(&writer, &types)?,
+        OutputFormat::Md => write_markdown(&writer, &types, total)?,
     }
 
     eprintln!(
-        "Found {} type definitions → {}/",
+        "Found {} type definitions (showing {}) → {}/",
+        total,
         types.len(),
         out_dir.display()
     );
@@ -65,12 +72,22 @@ pub fn run(args: DataArgs, repo: &Path, out_dir: &Path, format: OutputFormat) ->
 fn write_markdown(
     writer: &OutputWriter,
     types: &[(&std::path::Path, &scan::parser::ExtractedSymbol)],
+    total: usize,
 ) -> Result<()> {
     let mut f = std::fs::File::create(writer.output_file())?;
 
     writeln!(f, "# Data Structures")?;
     writeln!(f)?;
-    writeln!(f, "**Found**: {} type definitions  ", types.len())?;
+    if total > types.len() {
+        writeln!(
+            f,
+            "**Found**: {} type definitions (showing top {} — use `--limit` to see more)  ",
+            total,
+            types.len()
+        )?;
+    } else {
+        writeln!(f, "**Found**: {} type definitions  ", total)?;
+    }
     writeln!(f)?;
 
     if types.is_empty() {
