@@ -152,20 +152,59 @@ pub fn queries_for(lang: Language) -> crate::scan::queries::LanguageQueries {
     }
 }
 
+/// 预编译的 tree-sitter 查询对象。
+///
+/// 同一语言的所有文件共享同一组编译后的 Query，避免每个文件重复编译。
+/// 4 种语言 × 3 种查询 = 最多 12 个 Query 对象，而非每个文件 3 次编译。
+pub struct CompiledQueries {
+    pub symbols: tree_sitter::Query,
+    pub imports: tree_sitter::Query,
+    pub calls: tree_sitter::Query,
+}
+
+/// 按语言预编译 tree-sitter 查询。
+///
+/// 返回 `None` 当查询编译失败时（通常意味着查询模式有语法错误）。
+pub fn compile_queries(lang: Language) -> Option<CompiledQueries> {
+    let ts_lang = ts_language(lang);
+    let queries = queries_for(lang);
+    Some(CompiledQueries {
+        symbols: tree_sitter::Query::new(&ts_lang, queries.symbols).ok()?,
+        imports: tree_sitter::Query::new(&ts_lang, queries.imports).ok()?,
+        calls: tree_sitter::Query::new(&ts_lang, queries.calls).ok()?,
+    })
+}
+
 /// 用 tree-sitter 解析源文件，提取符号/导入/调用。
 ///
 /// 返回 `None` 当语言不支持或解析失败时。
+/// 便捷包装：内部编译查询后调用 `parse_file_with_queries`。
+/// 批量解析场景应使用 `parse_file_with_queries` + 预编译查询。
+#[allow(dead_code)]
 pub fn parse_file(path: &Path, source: &[u8]) -> Option<ParsedFile> {
-    use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
-
     let lang = detect_language(path)?;
+    let queries = compile_queries(lang)?;
+    parse_file_with_queries(path, source, lang, &queries)
+}
+
+/// 用预编译的查询解析源文件。
+///
+/// 与 `parse_file` 功能相同，但接受预编译的 `CompiledQueries`，避免重复编译。
+/// `scan_project` 应优先使用此函数以获得更好的性能。
+pub fn parse_file_with_queries(
+    path: &Path,
+    source: &[u8],
+    lang: Language,
+    queries: &CompiledQueries,
+) -> Option<ParsedFile> {
+    use tree_sitter::{Parser, QueryCursor, StreamingIterator};
+
     let ts_lang = ts_language(lang);
 
     let mut parser = Parser::new();
     parser.set_language(&ts_lang).ok()?;
     let tree = parser.parse(source, None)?;
 
-    let queries = queries_for(lang);
     let root = tree.root_node();
 
     let mut symbols = Vec::new();
@@ -173,9 +212,10 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Option<ParsedFile> {
     let mut calls = Vec::new();
 
     // 提取符号定义
-    if let Ok(query) = Query::new(&ts_lang, queries.symbols) {
+    {
+        let query = &queries.symbols;
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, root, source);
+        let mut matches = cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
             let mut name_text = None;
             let mut def_node = None;
@@ -215,9 +255,10 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Option<ParsedFile> {
     }
 
     // 提取导入声明
-    if let Ok(query) = Query::new(&ts_lang, queries.imports) {
+    {
+        let query = &queries.imports;
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, root, source);
+        let mut matches = cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
             let mut module_text = None;
             let mut line = 0;
@@ -241,9 +282,10 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Option<ParsedFile> {
     }
 
     // 提取函数调用
-    if let Ok(query) = Query::new(&ts_lang, queries.calls) {
+    {
+        let query = &queries.calls;
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&query, root, source);
+        let mut matches = cursor.matches(query, root, source);
         while let Some(m) = matches.next() {
             let mut call_name = None;
             let mut line = 0;
