@@ -130,12 +130,14 @@ Options:
 
 ```
 .inspect/
-├── find-how-<query>.md     # Results of find-how
-├── trace-<symbol>.md       # Results of trace
-├── entries.md              # Entry points found
-├── patterns.md             # Design patterns detected
-├── data.md                 # Data structures extracted
-└── hotspots.md             # Hotspots identified
+├── find-how-<query>.md         # Results of find-how
+├── trace-<symbol>.md           # Results of trace
+├── entries.md                  # Entry points found
+├── patterns.md                 # Design patterns (all categories)
+├── patterns-<category>.md      # Design patterns (filtered, e.g. patterns-concurrency.md)
+├── data.md                     # Data structures (all)
+├── data-<name>.md              # Data structures (filtered, e.g. data-RepoSpec.md)
+└── hotspots.md                 # Hotspots identified
 ```
 
 Each file is compact (typically 20-80 lines), designed for immediate LLM consumption.
