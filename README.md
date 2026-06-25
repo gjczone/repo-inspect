@@ -1,16 +1,30 @@
 # repo-inspect
 
-Surgical codebase inspection for AI agents — ask "how is X implemented?" and get a compact, structured answer. No API keys, no network calls, zero cost.
+Surgical codebase inspection for AI agents. Ask *"how is X implemented?"* and get a compact, structured answer — no API keys, no network calls, zero cost.
 
-Built for the `repo-inspect` skill. The Rust binary lives in `skills/repo-inspect/scripts/repo-inspect`.
+## What it does
 
-## Install the Skill
+AI agents waste context windows dumping entire repositories. `repo-inspect` fixes this by surgically extracting only what you need:
+
+```
+Agent: "How does Redux implement middleware?"
+  ↓
+repo-inspect find-how "middleware enhancer compose"
+  ↓
+.inspect/find-how-middleware.md   ← 40 lines, specific files + line numbers
+  ↓
+Agent reads the file, answers with precision
+```
+
+The Rust binary runs locally, respects `.gitignore`, and writes compact Markdown to `.inspect/`.
+
+## Install
 
 ```bash
 npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
 ```
 
-This installs the `repo-inspect` skill into your agent's skills directory. The binary (`repo-inspect`) is bundled with the skill — no separate install needed.
+This installs the skill + bundled binary. The binary works on Linux x86_64. For other platforms, build from source.
 
 ## Commands
 
@@ -25,25 +39,29 @@ This installs the `repo-inspect` skill into your agent's skills directory. The b
 
 ## Output
 
-Results are written to `.inspect/` (gitignored). Each query produces a single compact file:
+Results land in `.inspect/` (add to `.gitignore`). Each query produces one compact file:
 
 ```
 .inspect/
-├── find-how-middleware.md     # How middleware is implemented
-├── trace-applyMiddleware.md   # Call chain for applyMiddleware
-└── entries.md                 # All entry points found
+├── find-how-middleware.md
+├── trace-applyMiddleware.md
+└── entries.md
 ```
 
-## Usage (from an AI agent)
+## Quick Start
 
 ```bash
-# Clone a repo and inspect it
+# 1. Install the skill
+npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
+
+# 2. Clone any repo and ask a question
 gh repo clone reduxjs/redux -- --depth 1
 cd redux
-repo-inspect --repo . find-how "middleware plugin" --depth 2
 
-# Output: .inspect/find-how-middleware_plugin.md
-# Agent reads: Read .inspect/find-how-middleware_plugin.md
+# 3. Agent invokes the skill → subagent runs:
+repo-inspect --repo . find-how "middleware" --depth 2
+
+# 4. Results in .inspect/find-how-middleware.md
 ```
 
 ## Build from Source
@@ -57,23 +75,29 @@ cp target/release/repo-inspect skills/repo-inspect/scripts/
 
 Requires Rust 1.85+.
 
+## Why not repomix / zread / code2prompt?
+
+| Tool | Approach | repo-inspect difference |
+|------|----------|------------------------|
+| repomix | Dump entire repo into one file | Surgical: ask one question, get one answer |
+| zread | LLM-generated wiki (needs API key) | Zero API keys, local-only |
+| code2prompt | Full codebase → single prompt | Structured `.inspect/` files, layered consumption |
+
+`repo-inspect` is for when you know *what* you want to learn — not for exhaustive documentation.
+
 ## Project Structure
 
 ```
 repo-inspect/
-├── skills/repo-inspect/       # The skill (installed by `npx skills add`)
-│   ├── SKILL.md               # Skill definition & workflow
-│   ├── scripts/
-│   │   └── repo-inspect       # Pre-built binary (2.0 MB)
-│   └── references/
-│       └── commands.md        # Full command reference
+├── skills/repo-inspect/       # The skill
+│   ├── SKILL.md
+│   ├── scripts/repo-inspect   # Pre-built binary
+│   └── references/commands.md
 ├── src/                       # Rust source
-│   ├── main.rs
-│   ├── cli.rs
-│   ├── commands/              # Subcommand implementations
-│   ├── search/                # File search engine (ignore crate)
-│   ├── output/                # Markdown + JSON formatting
-│   └── git/                   # Git integration (gix crate)
 ├── Cargo.toml
-└── README.md
+└── AGENTS.md                  # Agent instructions
 ```
+
+## License
+
+MIT

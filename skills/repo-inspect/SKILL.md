@@ -52,17 +52,33 @@ If already in the target repo, verify with `git remote get-url origin`.
 
 ### Step 3: Run repo-inspect
 
-Spawn a **Bash subagent** to run the binary. The binary writes results to `.inspect/`.
+**Step 3a: Locate the binary.** The binary is bundled at `<skills-dir>/repo-inspect/scripts/repo-inspect`. Different agents install skills in different directories. Find it with:
 
 ```bash
-<path-to-skill>/scripts/repo-inspect --repo . <command> <args> --output md
+# Detect skills directory and locate the binary
+REPO_INSPECT=""
+for dir in ~/.agents/skills ~/.claude/skills ~/.openclaw/skills; do
+  if [ -f "$dir/repo-inspect/scripts/repo-inspect" ]; then
+    REPO_INSPECT="$dir/repo-inspect/scripts/repo-inspect"
+    break
+  fi
+done
+
+if [ -z "$REPO_INSPECT" ]; then
+  echo "ERROR: repo-inspect binary not found. Install the skill: npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect"
+  exit 1
+fi
+```
+
+**Step 3b: Run the command.** Spawn a **Bash subagent** to execute the binary. The binary writes results to `.inspect/`.
+
+```bash
+$REPO_INSPECT --repo . <command> <args> --output md
 ```
 
 **NEVER** run the binary yourself — use a subagent. The binary may take a few seconds on large repos.
 
-The binary's path is `<skills-dir>/repo-inspect/scripts/repo-inspect`. Determine `<skills-dir>` from context (usually `~/.agents/skills`).
-
-Wait for the subagent to complete before proceeding.
+**NEVER** hardcode a single skills directory path (like `~/.agents/skills`). Always use the detection loop above — the binary location depends on where the agent installed the skill.
 
 ### Step 4: Read and interpret results
 
