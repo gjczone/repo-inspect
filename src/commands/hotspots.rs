@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::Path;
 
 pub fn run(args: HotspotsArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -> Result<()> {
-    let writer = OutputWriter::new(out_dir, "hotspots", "ranked", format)?;
+    let writer = OutputWriter::new(out_dir, "hotspots", "", format)?;
 
     let scan_result = scan::scan_project(repo)?;
     let mut graph = graph::builder::build_graph(&scan_result);

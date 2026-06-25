@@ -19,7 +19,6 @@ fn main() -> Result<()> {
         .init();
 
     let args = cli::Args::parse();
-    let out_dir = args.out_dir;
     let format = args.output;
 
     // 解析 repo：本地路径直接使用，远程仓库先下载缓存
@@ -34,6 +33,14 @@ fn main() -> Result<()> {
             path.clone()
         }
         RepoSpec::Remote { owner, repo } => remote::prepare(owner, repo, args.refresh)?,
+    };
+
+    // 默认 .inspect/ 写入目标 repo 目录内，而非当前工作目录。
+    // 用户显式指定绝对路径时尊重其选择。
+    let out_dir = if args.out_dir.is_relative() {
+        repo.join(&args.out_dir)
+    } else {
+        args.out_dir
     };
 
     match args.command {

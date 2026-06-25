@@ -24,7 +24,9 @@ struct PatternInstance {
 
 pub fn run(args: PatternsArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -> Result<()> {
     let category_filter = args.category.as_deref().unwrap_or("all");
-    let writer = OutputWriter::new(out_dir, "patterns", category_filter, format)?;
+    // 有类别过滤时作为文件名后缀（如 patterns-concurrency.md），无过滤时省略（如 patterns.md）
+    let filename_label = args.category.as_deref().unwrap_or("");
+    let writer = OutputWriter::new(out_dir, "patterns", filename_label, format)?;
 
     let scan_result = scan::scan_project(repo)?;
     let mut patterns: Vec<PatternInstance> = Vec::new();

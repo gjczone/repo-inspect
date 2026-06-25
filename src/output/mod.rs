@@ -75,7 +75,12 @@ impl OutputWriter {
             OutputFormat::Json => "json",
             OutputFormat::Md => "md",
         };
-        let filename = format!("{}-{}.{}", command, sanitized, ext);
+        // 无用户查询时输出 `{command}.{ext}`（如 entries.md），有查询时保留后缀（如 data-RepoSpec.md）
+        let filename = if sanitized.is_empty() {
+            format!("{}.{}", command, ext)
+        } else {
+            format!("{}-{}.{}", command, sanitized, ext)
+        };
         let output_file = out_dir.join(filename);
 
         Ok(Self {

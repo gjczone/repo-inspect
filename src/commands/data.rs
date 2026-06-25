@@ -23,7 +23,8 @@ fn is_type_kind(kind: SymbolKind) -> bool {
 }
 
 pub fn run(args: DataArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -> Result<()> {
-    let query_label = args.name.as_deref().unwrap_or("all");
+    // 有名称过滤时作为文件名后缀（如 data-RepoSpec.md），无过滤时省略（如 data.md）
+    let query_label = args.name.as_deref().unwrap_or("");
     let writer = OutputWriter::new(out_dir, "data", query_label, format)?;
 
     let scan_result = scan::scan_project(repo)?;

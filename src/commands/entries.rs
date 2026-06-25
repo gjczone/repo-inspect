@@ -41,7 +41,7 @@ struct EntryPoint {
 }
 
 pub fn run(args: EntriesArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -> Result<()> {
-    let writer = OutputWriter::new(out_dir, "entries", "all", format)?;
+    let writer = OutputWriter::new(out_dir, "entries", "", format)?;
 
     let scan_result = scan::scan_project(repo)?;
     let mut entries: Vec<EntryPoint> = Vec::new();
