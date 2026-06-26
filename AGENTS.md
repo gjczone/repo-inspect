@@ -160,7 +160,7 @@ Trigger only when the task or milestone is fully completed:
 - Read `rules/ARCHITECTURE.md` before making architectural decisions.
 - Read `rules/PERFORMANCE.md` before optimizing performance or profiling.
 - Read `README.md` for user-facing reference only. NEVER duplicate its content in AGENTS.md.
-- Read `OPS.md` for the full 7-phase release workflow. NEVER guess release commands.
+- Read `rules/OPS.md` for the full 7-phase release workflow. NEVER guess release commands.
 
 ## Project Snapshot
 
