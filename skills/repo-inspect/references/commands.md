@@ -118,6 +118,54 @@ Uses git history (`gix` crate) to rank files by:
 
 ---
 
+## overview
+
+Single-command project spine: get a holistic architecture overview in one call.
+
+```bash
+# 本地仓库
+repo-inspect --repo <path> overview [--filter <keyword>]
+
+# 远程仓库（轻量级模式，只拉元数据不下载源文件）
+repo-inspect --repo owner/repo overview [--filter <keyword>] [--refresh]
+```
+
+**How it works**:
+1. Scans the project for symbols (tree-sitter) or uses cached metadata (remote lightweight)
+2. Builds the symbol dependency graph and calculates PageRank
+3. Extracts dependencies from config files (Cargo.toml, package.json, go.mod, pyproject.toml)
+4. Collects recent git changes or commits from GitHub API
+5. Produces a structured overview with 8 sections
+
+**Output sections**:
+- **Summary stats**: N symbols across M files (L languages)
+- **Language Support**: file count per language
+- **Key Dependencies**: extracted from project config files
+- **Recent Changes**: last 10 commits
+- **Top Files by PageRank**: file-level importance ranking
+- **Entry Points**: high-PageRank functions, types, and CLI mains
+- **Module Structure**: 2-level directory tree with file counts
+- **Complexity Hotspots**: symbol density × PageRank score
+- **Suggested Reading Order**: top 5 files to start reading
+
+**Modes**:
+- **Full mode** (local repo): full tree-sitter scan + graph + PageRank
+- **Lightweight mode** (remote repo): metadata only via GitHub API (tree + README + configs + commits), zero source file downloads
+
+**Example**:
+```bash
+repo-inspect --repo . overview
+# → .inspect/overview.md
+
+repo-inspect --repo . overview --filter graph
+# → .inspect/overview-graph.md
+
+repo-inspect --repo owner/repo overview
+# → .inspect/overview.md (lightweight, ~2s)
+```
+
+---
+
 ## Common Options
 
 | Option | Default | Description |
@@ -126,14 +174,19 @@ Uses git history (`gix` crate) to rank files by:
 | `--output md` | `md` | Output format: `md` (Markdown) or `json` |
 | `--out-dir <path>` | `.inspect` | Where to write output files |
 | `--refresh` | Off | Force re-fetch remote repo, bypass 24h cache (remote mode only) |
+| `--full` | Off | Force full download of all source files in remote mode, skip progressive scanning |
 
-### Remote Mode
+### Remote Mode (Three-Tier Progressive Scanning)
 
-When `--repo` is given in `owner/repo` format:
-1. Fetches the file tree from GitHub API (`git/trees/{branch}?recursive=1`)
-2. Downloads source files from `raw.githubusercontent.com`
-3. Caches files under `~/.cache/repo-inspect/remote/{owner}/{repo}/` with 24h TTL
-4. Then runs analysis on the cached files as if they were local
+When `--repo` is given in `owner/repo` format, the binary picks the optimal fetch strategy:
+
+| Tier | Commands | Strategy | Time |
+|------|----------|----------|------|
+| **Tier 1** (Lightweight) | `overview` | GitHub API: tree + README + configs + commits. Zero source files. | ~2s |
+| **Tier 2** (Selective) | `find-how`, `trace` | GitHub Search API → locate matching files → download only those (5-30 files). Falls back to Tier 3 if Search API unavailable. | ~5-10s |
+| **Tier 3** (Full) | `entries`, `patterns`, `data`, `hotspots` + `--full` flag | Download all source files. Incremental cache: only re-downloads changed files. | ~30s first, ~2s cached |
+
+**Cache**: `~/.cache/repo-inspect/remote/{owner}-{repo}/` with 24h per-file TTL. Each file tracked individually — subsequent runs only download new or changed files.
 
 Requires `GITHUB_TOKEN` env var for higher rate limits (optional, but recommended).
 

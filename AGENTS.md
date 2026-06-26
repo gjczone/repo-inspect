@@ -231,6 +231,7 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | Test | `cargo test` | Exit 0, 0 failed |
 | Binary size | `ls -lh target/release/repo-inspect` | < 6 MB |
 | find-how smoke | `cargo run -- --repo . find-how "test" --depth 1` | Exit 0, output in `.inspect/` |
+| overview smoke | `cargo run -- --repo . overview` | Exit 0, output in `.inspect/` |
 | Remote smoke | `./target/release/repo-inspect --repo gjczone/repo-inspect find-how "test"` | Exit 0 (requires GITHUB_TOKEN) |
 
 ## First Places to Inspect
@@ -242,6 +243,7 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | "How is output formatted?" | `src/output/mod.rs` |
 | "How does file search work?" | `src/search/mod.rs` |
 | "How is the skill structured?" | `skills/repo-inspect/SKILL.md` |
+| "How does overview work?" | `src/commands/overview.rs` → `src/scan/mod.rs` → `src/graph/` |
 | "How does remote mode work?" | `src/remote/mod.rs` (prepare, fetch_tree, fetch_raw_file, caching) |
 | "How does scan/parsing work?" | `src/scan/parser.rs` (CompiledQueries, 3-phase pipeline) |
 
