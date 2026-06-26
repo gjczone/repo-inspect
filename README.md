@@ -30,6 +30,7 @@ This installs the skill + bundled binary. The binary works on Linux x86_64. For 
 
 | Command | What it does |
 |---------|-------------|
+| `overview` | Single-command project spine: languages, deps, PageRank, structure |
 | `find-how <query>` | Find how a specific feature/technique is implemented |
 | `trace <symbol>` | Trace callers and callees of a function/type |
 | `entries` | Find all entry points (CLI, HTTP, events, plugins) |
@@ -43,6 +44,8 @@ Results land in `.inspect/` (add to `.gitignore`). Each query produces one compa
 
 ```
 .inspect/
+├── overview.md
+├── overview-graph.md
 ├── find-how-middleware.md
 ├── trace-applyMiddleware.md
 └── entries.md

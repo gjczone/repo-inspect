@@ -33,7 +33,7 @@ If results for the current question already exist, read them and answer. Skip to
 
 The `--repo` flag auto-detects the mode:
 - **Local**: pass a filesystem path, e.g., `--repo .` or `--repo /path/to/repo`
-- **Remote**: pass `owner/repo` format, e.g., `--repo gjczone/repo-inspect` — the binary fetches source files from GitHub API and caches them under `~/.cache/repo-inspect/remote/` with a 24h TTL. Use `--refresh` to force re-fetch.
+- **Remote**: pass `owner/repo` format, e.g., `--repo gjczone/repo-inspect` — the binary uses three-tier progressive scanning: overview pulls metadata only (~2s), find-how/trace use GitHub Search API to download only matching files (~5-10s), other commands download all source files. All results cached under `~/.cache/repo-inspect/remote/` with 24h per-file TTL. Use `--refresh` to force re-fetch, `--full` to force full download for any command.
 
 If you already have the repo cloned locally, use local mode for speed. Use remote mode when you don't want to clone.
 
@@ -41,6 +41,7 @@ If you already have the repo cloned locally, use local mode for speed. Use remot
 
 | User asks | Command |
 |-----------|---------|
+| "What is this project?" / "Architecture overview" | `overview` |
 | "How does X work?" / "How is Y implemented?" | `find-how "<query>"` |
 | "Who calls this function?" / "Trace the call chain" | `trace <symbol>` |
 | "What are the entry points?" / "How do I use this?" | `entries` |
@@ -111,6 +112,7 @@ The binary is a statically-compiled Rust CLI. Source at the repo root.
 repo-inspect --repo <repo> <command> [options]
 
 Commands:
+  overview   Single-command project spine (languages, deps, PageRank, structure)
   find-how   Search how a feature/technique is implemented
   trace      Trace callers and callees of a symbol
   entries    Find entry points (CLI, HTTP, events, plugins)
@@ -123,13 +125,17 @@ Options:
   --output    Output format: json or md (default: md)
   --out-dir   Output directory (default: .inspect)
   --refresh   Force re-fetch remote repo, bypass 24h cache (remote mode only)
+  --full      Force full download in remote mode (skip progressive scanning)
   --depth     Search depth for find-how (1-3, default: 2)
+  --filter    Filter overview to specific modules (e.g., --filter graph)
 ```
 
 ### Output format
 
 ```
 .inspect/
+├── overview.md                  # Project spine (languages, deps, PageRank, structure)
+├── overview-<filter>.md         # Overview filtered to specific modules
 ├── find-how-<query>.md         # Results of find-how
 ├── trace-<symbol>.md           # Results of trace
 ├── entries.md                  # Entry points found
