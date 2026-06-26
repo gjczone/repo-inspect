@@ -22,10 +22,13 @@ use anyhow::{Context, bail};
 use log::{debug, info};
 use rayon::prelude::*;
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+pub mod search;
 
 // ─── constants ──────────────────────────────────────────────────────────────
 
@@ -63,11 +66,43 @@ struct TreeItem {
     path: String,
     #[serde(rename = "type")]
     item_type: String,
+    /// File size in bytes (None for directories).
+    #[allow(dead_code)]
+    size: Option<u64>,
+    /// Blob SHA (None for directories).
+    #[allow(dead_code)]
+    sha: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct RateLimitResponse {
     message: Option<String>,
+}
+
+/// A recent commit (simplified — only sha and message).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CommitInfo {
+    pub sha: String,
+    pub message: String,
+}
+
+#[derive(Deserialize)]
+struct CommitResponse {
+    sha: String,
+    commit: CommitDetail,
+}
+
+#[derive(Deserialize)]
+struct CommitDetail {
+    message: String,
+}
+
+/// Serializable tree item for caching in lightweight mode.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedTreeItem {
+    path: String,
+    item_type: String,
+    size: Option<u64>,
 }
 
 // ─── cache metadata ─────────────────────────────────────────────────────────
@@ -77,6 +112,10 @@ struct CacheMeta {
     fetched_at: u64,
     branch: String,
     file_count: usize,
+    /// Per-file download timestamps for incremental caching.
+    /// Key = repo-relative path, Value = Unix epoch seconds when downloaded.
+    #[serde(default)]
+    files: HashMap<String, u64>,
 }
 
 // ─── public API ─────────────────────────────────────────────────────────────
@@ -110,7 +149,7 @@ pub fn parse_owner_repo(spec: &str) -> anyhow::Result<(String, String)> {
 /// 2. Fetches the repository metadata (default branch) from GitHub API.
 /// 3. Fetches the full file tree.
 /// 4. Filters to source files only.
-/// 5. Downloads each file and writes it to the cache directory.
+/// 5. Downloads only new or expired files (incremental cache), keeping fresh ones.
 /// 6. Writes `meta.json` and returns the cache directory path.
 pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf> {
     let cache_dir = cache_dir_path(owner, repo);
@@ -161,27 +200,56 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         );
     }
 
-    eprintln!(
-        "Downloading {} source files for {}/{}...",
-        source_files.len(),
-        owner,
-        repo
-    );
+    let now = now_secs();
 
-    // 4. 清理旧缓存并创建目录
-    if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir)
-            .with_context(|| format!("Failed to clear cache directory: {}", cache_dir.display()))?;
+    // 4. 增量缓存：读取已有 meta，保留未过期的文件
+    let existing_meta = read_cache_meta(&cache_dir).ok();
+    let mut fresh_files: HashMap<String, u64> = HashMap::new();
+
+    let need_download: Vec<&str> = source_files
+        .iter()
+        .filter(|path| {
+            let p: &str = path;
+            if let Some(ref meta) = existing_meta
+                && let Some(&ts) = meta.files.get(p)
+                && now.saturating_sub(ts) <= CACHE_TTL.as_secs()
+                && cache_dir.join(p).exists()
+            {
+                fresh_files.insert(p.to_string(), ts);
+                return false; // 已缓存且新鲜，跳过
+            }
+            true // 需要下载
+        })
+        .copied()
+        .collect();
+
+    let skipped = source_files.len() - need_download.len();
+    if skipped > 0 {
+        eprintln!(
+            "Skipping {} cached files, need to download {} files for {}/{}...",
+            skipped,
+            need_download.len(),
+            owner,
+            repo
+        );
+    } else {
+        eprintln!(
+            "Downloading {} source files for {}/{}...",
+            need_download.len(),
+            owner,
+            repo
+        );
     }
+
+    // 确保缓存目录存在（不清除已有文件）
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
-    // 5. 并行下载文件（rayon 线程池，raw.githubusercontent.com 不计入 API 限额）
+    // 5. 并行下载需要更新的文件
     let fetched = AtomicUsize::new(0);
     let errors = AtomicUsize::new(0);
 
-    // 并行下载，收集成功的结果
-    let results: Vec<(&str, String)> = source_files
+    let results: Vec<(&str, String)> = need_download
         .par_iter()
         .filter_map(|rel_path| {
             match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
@@ -198,7 +266,7 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         })
         .collect();
 
-    // 串行写入磁盘（避免并发文件系统竞争）
+    // 串行写入磁盘
     for (rel_path, content) in &results {
         let dest = cache_dir.join(rel_path);
         if let Some(parent) = dest.parent() {
@@ -206,9 +274,11 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         }
         fs::write(&dest, content)
             .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
+        // 记录新下载文件的时间戳
+        fresh_files.insert(rel_path.to_string(), now);
     }
 
-    let fetched = fetched.load(Ordering::Relaxed);
+    let fetched = fetched.load(Ordering::Relaxed) + skipped;
     let errors = errors.load(Ordering::Relaxed);
 
     if fetched == 0 {
@@ -221,38 +291,227 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
     }
 
     debug!(
-        "Fetched {} files, {} errors for {}/{}",
-        fetched, errors, owner, repo
+        "Fetched {} files (new), {} skipped, {} errors for {}/{}",
+        fetched - skipped,
+        skipped,
+        errors,
+        owner,
+        repo
     );
 
     // 6. 写入缓存元数据
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-
     let meta = CacheMeta {
         fetched_at: now,
         branch: branch.clone(),
         file_count: fetched,
+        files: fresh_files,
     };
 
-    let meta_json =
-        serde_json::to_string_pretty(&meta).context("Failed to serialize cache metadata")?;
-    fs::write(cache_dir.join("meta.json"), meta_json).context("Failed to write cache metadata")?;
+    write_cache_meta(&cache_dir, &meta)?;
 
     eprintln!(
-        "Fetched {} files for {}/{} → {}",
+        "Fetched {} files for {}/{} ({} new, {} cached) → {}",
         fetched,
         owner,
         repo,
+        fetched - skipped,
+        skipped,
         cache_dir.display()
     );
 
     Ok(cache_dir)
 }
 
+/// Prepare a lightweight cache for overview — only metadata, no source file downloads.
+///
+/// Fetches: file tree (paths + sizes), README, config files, recent commits.
+/// This is Tier 1 of the progressive remote scanning architecture.
+pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf> {
+    let cache_dir = cache_dir_path(owner, repo);
+
+    // 缓存命中（未要求刷新 且 TTL 未过期）
+    if !refresh && let Some(dir) = check_cache(&cache_dir) {
+        info!("Using cached lightweight metadata for {}/{}", owner, repo);
+        eprintln!(
+            "Using cached metadata for {}/{} → {}",
+            owner,
+            repo,
+            dir.display()
+        );
+        return Ok(dir);
+    }
+
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    eprintln!("Fetching overview metadata for {}/{}...", owner, repo);
+
+    // 1. 获取默认分支
+    let branch = get_default_branch(owner, repo, token.as_deref())?;
+    debug!("Default branch for {}/{}: {}", owner, repo, branch);
+
+    // 2. 获取文件树（含 size 信息）
+    let tree = get_file_tree(owner, repo, &branch, token.as_deref())?;
+    debug!("Fetched tree: {} entries", tree.len());
+
+    // 3. 并行获取 README、配置文件、最近提交
+    let readme = fetch_readme(owner, repo, &branch);
+    let config_files = fetch_config_files(owner, repo, &branch);
+    let commits = fetch_recent_commits(owner, repo, token.as_deref());
+
+    // 4. 清理旧缓存并创建目录
+    if cache_dir.exists() {
+        fs::remove_dir_all(&cache_dir)
+            .with_context(|| format!("Failed to clear cache directory: {}", cache_dir.display()))?;
+    }
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
+
+    // 5. 写入文件树缓存（json 格式，方便 overview 命令读取）
+    let cached_tree: Vec<CachedTreeItem> = tree
+        .iter()
+        .map(|item| CachedTreeItem {
+            path: item.path.clone(),
+            item_type: item.item_type.clone(),
+            size: item.size,
+        })
+        .collect();
+    let tree_json =
+        serde_json::to_string_pretty(&cached_tree).context("Failed to serialize tree")?;
+    fs::write(cache_dir.join("tree.json"), tree_json).context("Failed to write tree cache")?;
+
+    // 6. 写入 README
+    if let Ok(Some(content)) = readme {
+        fs::write(cache_dir.join("README.md"), content).context("Failed to write README cache")?;
+    }
+
+    // 7. 写入配置文件
+    if let Ok(configs) = config_files {
+        for (filename, content) in &configs {
+            fs::write(cache_dir.join(filename), content)
+                .with_context(|| format!("Failed to write config cache: {}", filename))?;
+        }
+    }
+
+    // 8. 写入最近提交
+    if let Ok(commits) = commits {
+        let commits_json =
+            serde_json::to_string_pretty(&commits).context("Failed to serialize commits")?;
+        fs::write(cache_dir.join("commits.json"), commits_json)
+            .context("Failed to write commits cache")?;
+    }
+
+    // 9. 写入缓存元数据
+    let now = now_secs();
+
+    let meta = CacheMeta {
+        fetched_at: now,
+        branch: branch.clone(),
+        file_count: tree.len(),
+        files: HashMap::new(),
+    };
+    write_cache_meta(&cache_dir, &meta)?;
+
+    eprintln!(
+        "Fetched overview metadata for {}/{}, {} tree entries → {}",
+        owner,
+        repo,
+        tree.len(),
+        cache_dir.display()
+    );
+
+    Ok(cache_dir)
+}
+
+/// Fetch the repository's README file.
+///
+/// Tries common README filenames (README.md, readme.md, README, README.rst, etc.)
+/// and returns the content of the first one found.
+pub fn fetch_readme(owner: &str, repo: &str, branch: &str) -> anyhow::Result<Option<String>> {
+    let candidates = [
+        "README.md",
+        "readme.md",
+        "README",
+        "README.rst",
+        "README.txt",
+        "Readme.md",
+    ];
+
+    for name in candidates {
+        let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, name);
+        match http_get_raw(&raw_url, None) {
+            Ok(body) => return Ok(Some(body)),
+            Err(_) => continue,
+        }
+    }
+
+    debug!("No README found for {}/{}", owner, repo);
+    Ok(None)
+}
+
+/// Fetch common config files from the repository root.
+///
+/// Tries Cargo.toml, package.json, go.mod, pyproject.toml and returns
+/// each found file's content keyed by filename.
+pub fn fetch_config_files(
+    owner: &str,
+    repo: &str,
+    branch: &str,
+) -> anyhow::Result<HashMap<String, String>> {
+    let candidates = ["Cargo.toml", "package.json", "go.mod", "pyproject.toml"];
+
+    let mut configs = HashMap::new();
+
+    for name in candidates {
+        let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, name);
+        match http_get_raw(&raw_url, None) {
+            Ok(body) => {
+                debug!("Fetched config file: {}", name);
+                configs.insert(name.to_string(), body);
+            }
+            Err(_) => continue,
+        }
+    }
+
+    if configs.is_empty() {
+        debug!("No config files found for {}/{}", owner, repo);
+    }
+
+    Ok(configs)
+}
+
+/// Fetch the 10 most recent commits for a repository.
+pub fn fetch_recent_commits(
+    owner: &str,
+    repo: &str,
+    token: Option<&str>,
+) -> anyhow::Result<Vec<CommitInfo>> {
+    let url = format!("{}/repos/{}/{}/commits?per_page=10", API_BASE, owner, repo);
+
+    let resp = api_get(&url, token)
+        .with_context(|| format!("Failed to fetch commits for {}/{}", owner, repo))?;
+
+    let commits: Vec<CommitResponse> =
+        serde_json::from_str(&resp).context("Failed to parse GitHub commits API response")?;
+
+    let result: Vec<CommitInfo> = commits
+        .into_iter()
+        .map(|c| CommitInfo {
+            sha: c.sha[..8.min(c.sha.len())].to_string(),
+            message: c.commit.message.lines().next().unwrap_or("").to_string(),
+        })
+        .collect();
+
+    Ok(result)
+}
+
 // ─── cache helpers ──────────────────────────────────────────────────────────
+
+/// Get current Unix timestamp in seconds.
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 /// Compute the cache directory path for a given owner/repo.
 fn cache_dir_path(owner: &str, repo: &str) -> PathBuf {
@@ -261,6 +520,22 @@ fn cache_dir_path(owner: &str, repo: &str) -> PathBuf {
         .join("repo-inspect")
         .join("remote")
         .join(format!("{}-{}", owner, repo))
+}
+
+/// Read cache metadata from a cache directory.
+fn read_cache_meta(dir: &Path) -> anyhow::Result<CacheMeta> {
+    let meta_path = dir.join("meta.json");
+    let content = fs::read_to_string(&meta_path)
+        .with_context(|| format!("Failed to read cache metadata: {}", meta_path.display()))?;
+    serde_json::from_str(&content).context("Failed to parse cache metadata")
+}
+
+/// Write cache metadata to a cache directory.
+fn write_cache_meta(dir: &Path, meta: &CacheMeta) -> anyhow::Result<()> {
+    let meta_json =
+        serde_json::to_string_pretty(meta).context("Failed to serialize cache metadata")?;
+    fs::write(dir.join("meta.json"), meta_json).context("Failed to write cache metadata")?;
+    Ok(())
 }
 
 /// Check whether a cached directory is still fresh.
@@ -274,10 +549,7 @@ fn check_cache(dir: &Path) -> Option<PathBuf> {
 
     let meta: CacheMeta = serde_json::from_str(&fs::read_to_string(&meta_path).ok()?).ok()?;
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let now = now_secs();
 
     // 检查 TTL
     if now.saturating_sub(meta.fetched_at) > CACHE_TTL.as_secs() {
@@ -296,6 +568,193 @@ fn check_cache(dir: &Path) -> Option<PathBuf> {
     }
 
     Some(dir.to_path_buf())
+}
+
+/// Ensure a single file is cached locally, downloading it if missing or expired.
+///
+/// Returns the local path to the cached file. Thread-safe: uses file-level
+/// timestamp tracking to avoid redundant downloads.
+#[allow(dead_code)]
+pub fn ensure_cached(owner: &str, repo: &str, branch: &str, path: &str) -> anyhow::Result<PathBuf> {
+    let cache_dir = cache_dir_path(owner, repo);
+    let dest = cache_dir.join(path);
+    let now = now_secs();
+
+    // 检查是否已缓存且新鲜
+    if let Ok(meta) = read_cache_meta(&cache_dir)
+        && let Some(&ts) = meta.files.get(path)
+        && now.saturating_sub(ts) <= CACHE_TTL.as_secs()
+        && dest.exists()
+    {
+        debug!("File already cached and fresh: {}", path);
+        return Ok(dest);
+    }
+
+    // 下载文件
+    debug!("Downloading single file: {}", path);
+    let token = std::env::var("GITHUB_TOKEN").ok();
+    let content = fetch_raw_file(owner, repo, branch, path, token.as_deref())?;
+
+    // 写入磁盘
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&dest, &content)
+        .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
+
+    // 更新元数据
+    let mut meta = read_cache_meta(&cache_dir).unwrap_or(CacheMeta {
+        fetched_at: now,
+        branch: branch.to_string(),
+        file_count: 0,
+        files: HashMap::new(),
+    });
+    meta.files.insert(path.to_string(), now);
+    meta.file_count = meta.files.len();
+    write_cache_meta(&cache_dir, &meta)?;
+
+    Ok(dest)
+}
+
+// ─── tier-2 selective preparation ─────────────────────────────────────────────
+
+/// Prepare cache selectively using GitHub Search API (Tier 2).
+///
+/// Searches for files matching the query, downloads only those files,
+/// and returns the cache directory path. Falls back to full `prepare()`
+/// if Search API is unavailable or rate-limited.
+pub fn prepare_selective(
+    owner: &str,
+    repo: &str,
+    query: &str,
+    refresh: bool,
+) -> anyhow::Result<PathBuf> {
+    let cache_dir = cache_dir_path(owner, repo);
+
+    // 如果缓存完整且新鲜，直接返回
+    if !refresh && let Some(dir) = check_cache(&cache_dir) {
+        eprintln!(
+            "Using cached files for {}/{} → {}",
+            owner,
+            repo,
+            dir.display()
+        );
+        return Ok(dir);
+    }
+
+    let token = std::env::var("GITHUB_TOKEN").ok();
+
+    eprintln!(
+        "Searching GitHub for \"{}\" in {}/{}...",
+        query, owner, repo
+    );
+
+    // 1. 获取默认分支
+    let branch = get_default_branch(owner, repo, token.as_deref())?;
+
+    // 2. 确保缓存目录存在并初始化 meta
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
+    let mut meta = read_cache_meta(&cache_dir).unwrap_or(CacheMeta {
+        fetched_at: now_secs(),
+        branch: branch.clone(),
+        file_count: 0,
+        files: HashMap::new(),
+    });
+
+    // 3. 使用 Search API 定位匹配文件
+    let search_results = match search::search_code(owner, repo, query, token.as_deref()) {
+        Ok(results) => {
+            eprintln!("Found {} matching files via Search API", results.len());
+            results
+        }
+        Err(e) => {
+            // 降级：Search API 失败，使用全量准备
+            eprintln!(
+                "Search API unavailable ({}), falling back to full download...",
+                e
+            );
+            return prepare(owner, repo, refresh);
+        }
+    };
+
+    if search_results.is_empty() {
+        eprintln!("No matching files found via Search API, trying full download...");
+        return prepare(owner, repo, refresh);
+    }
+
+    // 4. 按需下载匹配文件（最多 30 个文件）
+    let to_download: Vec<&str> = search_results
+        .iter()
+        .filter(|r| is_source_file(&r.path))
+        .map(|r| r.path.as_str())
+        .take(30)
+        .collect();
+
+    eprintln!(
+        "Downloading {} source files for {}/{}...",
+        to_download.len(),
+        owner,
+        repo
+    );
+
+    let fetched = AtomicUsize::new(0);
+    let now = now_secs();
+
+    let results: Vec<(&str, String)> = to_download
+        .par_iter()
+        .filter_map(|rel_path| {
+            match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
+                Ok(content) => {
+                    fetched.fetch_add(1, Ordering::Relaxed);
+                    Some((*rel_path, content))
+                }
+                Err(e) => {
+                    debug!("Failed to fetch {}: {}", rel_path, e);
+                    None
+                }
+            }
+        })
+        .collect();
+
+    for (rel_path, content) in &results {
+        let dest = cache_dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&dest, content)
+            .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
+        meta.files.insert(rel_path.to_string(), now);
+    }
+
+    let count = fetched.load(Ordering::Relaxed);
+    meta.file_count = meta.files.len();
+    meta.fetched_at = now;
+    write_cache_meta(&cache_dir, &meta)?;
+
+    eprintln!(
+        "Downloaded {} files for {}/{} (selective) → {}",
+        count,
+        owner,
+        repo,
+        cache_dir.display()
+    );
+
+    Ok(cache_dir)
+}
+
+/// Prepare cache for symbol tracing (Tier 2).
+///
+/// Downloads the file containing the target symbol plus its direct dependencies
+/// (imported files), then returns the cache directory path.
+pub fn prepare_trace(
+    owner: &str,
+    repo: &str,
+    symbol: &str,
+    refresh: bool,
+) -> anyhow::Result<PathBuf> {
+    // 暂时使用选择性准备（未来可优化为按调用链下载）
+    prepare_selective(owner, repo, symbol, refresh)
 }
 
 // ─── GitHub API helpers ─────────────────────────────────────────────────────

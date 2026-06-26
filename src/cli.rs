@@ -66,6 +66,10 @@ pub struct Args {
     #[arg(long)]
     pub refresh: bool,
 
+    /// Force full download of all source files in remote mode (Tier 3, skip progressive scanning)
+    #[arg(long)]
+    pub full: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -84,6 +88,8 @@ pub enum Command {
     Data(DataArgs),
     /// Identify hotspots: frequently changed or complex files
     Hotspots(HotspotsArgs),
+    /// Single-command project spine: architecture overview, dependencies, module structure
+    Overview(OverviewArgs),
 }
 
 #[derive(clap::Args)]
@@ -139,6 +145,13 @@ pub struct HotspotsArgs {
     /// Number of top hotspots to return
     #[arg(short, long, default_value = "10")]
     pub count: usize,
+}
+
+#[derive(clap::Args)]
+pub struct OverviewArgs {
+    /// Optional keyword to focus overview on specific modules/files
+    #[arg(short, long)]
+    pub filter: Option<String>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy)]
