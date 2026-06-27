@@ -1,106 +1,74 @@
 # repo-inspect
 
-Surgical codebase inspection for AI agents. Ask *"how is X implemented?"* and get a compact, structured answer — no API keys, no network calls, zero cost.
+Surgical codebase inspection CLI for AI agents — ask "how is X implemented?" and get compact, structured output.
 
-## What it does
-
-AI agents waste context windows dumping entire repositories. `repo-inspect` fixes this by surgically extracting only what you need:
-
-```
-Agent: "How does Redux implement middleware?"
-  ↓
-repo-inspect find-how "middleware enhancer compose"
-  ↓
-.inspect/find-how-middleware.md   ← 40 lines, specific files + line numbers
-  ↓
-Agent reads the file, answers with precision
-```
-
-The Rust binary runs locally, respects `.gitignore`, and writes compact Markdown to `.inspect/`.
-
-## Install
+## Installation
 
 ```bash
 npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
 ```
 
-This installs the skill + bundled binary. The binary works on Linux x86_64. For other platforms, build from source.
-
-## Commands
-
-| Command | What it does |
-|---------|-------------|
-| `overview` | Single-command project spine: languages, deps, PageRank, structure |
-| `find-how <query>` | Find how a specific feature/technique is implemented |
-| `trace <symbol>` | Trace callers and callees of a function/type |
-| `entries` | Find all entry points (CLI, HTTP, events, plugins) |
-| `patterns` | Detect design patterns and conventions |
-| `data` | Extract core data structures and schemas |
-| `hotspots` | Identify most-changed and most-complex files |
-
-## Output
-
-Results land in `.inspect/` (add to `.gitignore`). Each query produces one compact file:
-
-```
-.inspect/
-├── overview.md
-├── overview-graph.md
-├── find-how-middleware.md
-├── trace-applyMiddleware.md
-└── entries.md
-```
-
-## Quick Start
+The binary is also available via Cargo:
 
 ```bash
-# 1. Install the skill
-npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
-
-# 2. Clone any repo and ask a question
-gh repo clone reduxjs/redux -- --depth 1
-cd redux
-
-# 3. Agent invokes the skill → subagent runs:
-repo-inspect --repo . find-how "middleware" --depth 2
-
-# 4. Results in .inspect/find-how-middleware.md
+cargo install repo-inspect
 ```
 
-## Build from Source
+## Core Commands
+
+| Command | When to use | What it does |
+|---------|-------------|--------------|
+| `overview` | First time opening a repo | Prints a one-page project spine: structure, key modules, entry points |
+| `find-how` | "How is X implemented?" | Searches codebase for a keyword, returns ranked files with matched lines |
+| `trace` | "What calls this function?" | Follows call chains from a symbol through callers and callees |
+| `entries` | "Where does execution start?" | Detects entry points — main functions, route handlers, command handlers |
+| `patterns` | "What design patterns are used?" | Heuristic detection of common patterns (singleton, factory, observer) |
+| `data` | "What data structures exist?" | Extracts type definitions, structs, interfaces, and enums |
+| `hotspots` | "What files change most often?" | Ranks files by change frequency from git history |
+
+All output lands in `.inspect/` as Markdown (default) or JSON (`--output json`).
+
+## Quick Examples
 
 ```bash
-git clone https://github.com/gjczone/repo-inspect
-cd repo-inspect
-cargo build --release
-cp target/release/repo-inspect skills/repo-inspect/scripts/
+# Inspect a local repo — how is authentication implemented?
+repo-inspect --repo ./my-project find-how "authentication"
+
+# Inspect a remote GitHub repo — get the project overview
+repo-inspect --repo gjczone/repo-inspect overview
+
+# Trace callers of a specific function
+repo-inspect --repo . trace "handle_request" --depth 3
+
+# Find change hotspots, refresh git data
+repo-inspect --repo . hotspots --full
 ```
 
-Requires Rust 1.85+.
+## Remote Mode
 
-## Why not repomix / zread / code2prompt?
+Prefix the repo with `owner/repo` to inspect any public GitHub repository without cloning:
 
-| Tool | Approach | repo-inspect difference |
-|------|----------|------------------------|
-| repomix | Dump entire repo into one file | Surgical: ask one question, get one answer |
-| zread | LLM-generated wiki (needs API key) | Zero API keys, local-only |
-| code2prompt | Full codebase → single prompt | Structured `.inspect/` files, layered consumption |
-
-`repo-inspect` is for when you know *what* you want to learn — not for exhaustive documentation.
-
-## Project Structure
-
+```bash
+repo-inspect --repo rust-lang/rust find-how "async"
 ```
-repo-inspect/
-├── skills/repo-inspect/       # The skill
-│   ├── SKILL.md
-│   ├── scripts/repo-inspect   # Pre-built binary
-│   └── references/commands.md
-├── src/                       # Rust source
-├── Cargo.toml
-└── AGENTS.md                  # Agent instructions
-```
+
+Remote mode fetches file trees and raw files via the GitHub API. Set `GITHUB_TOKEN` to avoid rate limits. Results are cached locally for 24 hours.
+
+## Supported Languages
+
+| Language | Overview | find-how | trace | patterns | data |
+|----------|----------|----------|-------|----------|------|
+| Rust | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Python | ✓ | ✓ | ✓ | ✓ | ✓ |
+| TypeScript | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Go | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Other languages work with text-level search (`find-how` text fallback) even without tree-sitter grammar support.
+
+## Credits
+
+Built with [tree-sitter](https://tree-sitter.github.io/) for structured code parsing.
 
 ## License
 
-MIT
+[MIT](LICENSE)

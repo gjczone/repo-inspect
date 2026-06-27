@@ -1,77 +1,90 @@
 # Coding Rules — repo-inspect
 
-Rust 2024 edition. All rules come from evidence in the repository.
+Rust 2024 edition. Project-specific conventions — things an LLM would not know from general Rust knowledge. Every rule cites evidence from the repository.
 
-## Function Scope
+---
 
-- **NEVER** write a function that does more than one thing. If the name needs "and" to describe its purpose, split it.
-- This rule applies only to new or modified functions within the task scope. **NEVER** proactively refactor existing functions on this basis.
+## 1. Layer Boundaries
 
-## File Boundaries
+Import direction is top-down only. Evidence: `rules/ARCHITECTURE.md` lines 26-29; verified by inspecting `use` statements across the codebase.
 
-- One file = one business concept. Any file with a generic name (`utils`, `helpers`, `common`, `misc`) that spans multiple unrelated domains is a boundary violation — regardless of line count.
-- When a file directly touched by the task contains 2+ unrelated domains, extract each into its own file. **NEVER** proactively scan the codebase to clean this up.
-- **NEVER** create a module file that only re-exports another module's symbols — inline the imports at call sites instead.
+| Layer | May import from |
+|-------|----------------|
+| `cli` | Nothing (standalone clap definitions) |
+| `main` | `cli`, `remote`, any `commands/` |
+| `commands/*` | `search`, `output`, `scan`, `graph` |
+| `remote` | `search`, `scan` |
+| `search`, `output`, `scan`, `graph` | Each other; crates only |
 
-## Error Handling
+- **NEVER** import `cli` or `main` from `commands/` or lower.
+- **NEVER** cross-import between command modules (e.g., `find_how` importing from `trace`).
 
-- Every `match Err` / `?` error path **MUST** either handle the error with a log or propagate it. Empty error branches are forbidden.
-- Log: what operation failed, the input context, and the original error message.
-- Use `anyhow::Result` for application-level errors, `thiserror` for library-level structured errors.
-- **NEVER** leave an `unwrap()` or `expect()` on a fallible operation that can fail under normal use — use `?` with `anyhow::Result`.
+## 2. New Subcommand Registration Pattern
 
-## Parallelism (rayon)
+Every new subcommand follows a fixed 4-step registration path. Evidence: `src/cli.rs` (Command enum), `src/main.rs` (match dispatch), `rules/ARCHITECTURE.md` lines 56-61.
 
-- Use `par_iter()` for CPU-bound parallel work (tree-sitter parsing, remote file downloads).
+1. Create `src/commands/<name>.rs` — implement logic with a public `run()` function
+2. Register in `src/cli.rs`: add variant to `Command` enum, add field to `Args` struct
+3. Register in `src/main.rs`: add match arm dispatching to the new `run()`
+4. Add a smoke test in the new module file
+
+- **NEVER** implement a subcommand without wiring it through all three files.
+- **NEVER** leave `unimplemented!()` or `todo!()` in a registered command variant.
+
+## 3. Parallelism Rules
+
+CPU-bound work uses rayon. Evidence: `src/scan/mod.rs` (3-phase pipeline with `par_iter`), `src/remote/mod.rs` (parallel downloads with `par_iter`).
+
+- Use `par_iter()` for tree-sitter parsing and remote file downloads.
 - Use `AtomicUsize` for lock-free counters in parallel contexts (e.g., progress tracking).
 - **NEVER** hold a `Mutex` across a `par_iter()` — prefer atomics or collect-then-merge.
-- Scan pipeline: serial I/O phase collects files, then rayon parallelizes the parse phase.
+- Scan pipeline: serial I/O collects files → rayon parallelizes the parse phase.
+- Remote pipeline: serial GitHub API tree fetch → rayon `par_iter` parallel raw downloads.
 
-## Query Caching (CompiledQueries)
+## 4. CompiledQueries Caching
 
-- `CompiledQueries` pre-compiles tree-sitter `Query` objects once, then reuses them across all files.
-- **NEVER** call `tree_sitter::Query::new()` inside a per-file loop — compile once, pass as reference.
-- Pattern: build `CompiledQueries` at scan start → pass `&CompiledQueries` into parallel parse workers.
+Tree-sitter `Query` objects are compiled once per language and reused across all files. Evidence: `src/scan/mod.rs` (3-phase pipeline description), `src/scan/parser.rs`.
 
-## Dependencies
+- Build `CompiledQueries` once at scan start per language.
+- Pass `&CompiledQueries` into parallel parse workers — **NEVER** recompile per file.
+- **NEVER** call `tree_sitter::Query::new()` inside a per-file loop.
+
+## 5. Dependencies
+
+Evidence: `Cargo.toml` (no async runtime dependency; `minreq` for sync HTTP), AGENTS.md.
 
 - **NEVER** add a new dependency without explicit justification in the PR body.
-- **NEVER** introduce async runtime (tokio/async-std) — the project uses synchronous HTTP (`minreq`) and local file I/O.
+- **NEVER** introduce an async runtime (`tokio`, `async-std`). The project uses synchronous HTTP (`minreq`) and blocking file I/O.
 - External library APIs → query `context7` MCP. **NEVER** guess API signatures.
 
-## CLI API (the binary's public interface)
+## 6. CLI API Stability
 
-- The CLI interface IS the API. **NEVER** change a command name, flag, or output format without backward compatibility or a major version bump.
-- Output filenames follow the pattern `<command>-<sanitized-query>.<ext>`. **NEVER** change the sanitization logic without updating consumers.
-- `--output json` mode MUST produce valid JSON matching the `FindHowOutput` struct shape.
+The CLI interface IS the public API consumed by external agents via the skill. Evidence: `src/cli.rs` (Args/Command definitions), AGENTS.md.
 
-## Comments
+- **NEVER** rename a command variant or CLI flag without backward compatibility.
+- **NEVER** change output format shape (`FindHowOutput` struct) without updating consumers.
+- Output filenames follow `<command>-<sanitized-query>.<ext>`. **NEVER** change sanitization logic (`src/output/mod.rs`) without updating consumers.
+- When modifying `src/cli.rs`, update `skills/repo-inspect/references/commands.md` in the same change.
 
-- Comments must explain: business purpose, implementation logic, and edge cases. Use Chinese; avoid jargon.
-- **NEVER** leave `eprintln!` debug output in committed code — use `log` crate macros (`info!`, `debug!`, `error!`).
+## 7. Error Handling
 
-## Naming
+Evidence: `Cargo.toml` (`anyhow` + `thiserror`), `src/main.rs` (`anyhow::Result`), grep for `log::` macros across source files.
 
-| Element | Convention | Example |
-|---------|------------|---------|
-| Module | snake_case | `find_how`, `mod.rs` |
-| Function | snake_case | `run()`, `fetch_raw_file()` |
-| Struct | PascalCase | `Args`, `RepoSpec` |
-| Enum variant | PascalCase | `Remote { owner, repo }` |
-| Constant | UPPER_SNAKE_CASE | `API_BASE`, `CACHE_TTL` |
-| Crate | kebab-case | `repo-inspect` |
+- Application-level: use `anyhow::Result<T>` with `?` propagation.
+- Library-level (shared error types): use `thiserror` derive macros.
+- Logging: use `log` crate macros (`info!`, `debug!`, `error!`, `warn!`). **NEVER** use `eprintln!` in production code.
+- Every `match Err` / `?` error path **MUST** log or propagate. Empty error branches (`_ => {}`) are forbidden.
+- **NEVER** leave `unwrap()` or `expect()` on operations that can fail under normal use (I/O, network, parsing).
 
-## Anti-Patterns
+## 8. Comments
 
-| Anti-Pattern | Detection | Fix |
-|--------------|-----------|-----|
-| `unwrap()` on fallible ops | `.unwrap()` on I/O, network, parse | Use `?` with anyhow |
-| Empty error branch | `_ => {}` without log | Log or propagate |
-| Subcommand stub | `unimplemented!()` / `todo!()` | Implement or leave out |
-| `eprintln!` in production | Raw stderr prints | Use `log` crate |
-| Magic paths | Hardcoded `/tmp/...` | Use `dirs_fallback()` or config |
+Evidence: project convention stated in AGENTS.md.
 
-## Change Discipline
+- Comments explain business purpose, implementation logic, and edge cases.
+- Write comments in Chinese; keep code identifiers, commands, and technical terms in English.
 
-- When replacing a component, function, or module: ① grep all references, ② update them, ③ delete the old file — all in the same change. No leftover references. No compatibility wrappers.
-- **NEVER** modify the CLI interface (`src/cli.rs`) without updating `skills/repo-inspect/references/commands.md`.
+## 9. Change Discipline
+
+Evidence: project convention, verified by module structure and import graphs.
+
+- When replacing a component, function, or module: ① grep all callers, ② update every reference, ③ delete the old file — all in one change. No compatibility wrappers. No leftover `pub use` re-exports.

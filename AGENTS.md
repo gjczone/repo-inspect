@@ -128,9 +128,9 @@ Trigger only when the task or milestone is fully completed:
 
 ### 5.3 API Calls
 
-- Before writing any code that calls your project's own backend (regardless of language or library), read `./api.d.ts` first. Endpoint path, HTTP method, request shape, and response shape must match exactly.
-- External library APIs → query `context7` MCP. Your project's own API → read `./api.d.ts`. **NEVER** guess either.
-- If `api.d.ts` does not exist or the needed endpoint is missing: update `api.d.ts` first, then implement both backend and frontend together. **NEVER** write client code against an undocumented endpoint.
+- Before writing any code that calls your project's own backend (regardless of language or library), read `rules/api.d.ts` first. Endpoint path, HTTP method, request shape, and response shape must match exactly.
+- External library APIs → query `context7` MCP. Your project's own API → read `rules/api.d.ts`. **NEVER** guess either.
+- If `rules/api.d.ts` does not exist or the needed endpoint is missing: update `rules/api.d.ts` first, then implement both backend and frontend together. **NEVER** write client code against an undocumented endpoint.
 
 ---
 
@@ -142,25 +142,34 @@ Trigger only when the task or milestone is fully completed:
 
 <general-project-rules>
 
+## shazam Tools — USE THEM
+
+You have access to pi-shazam — 9 code analysis tools. You WILL use every one of them. They are NOT optional.
+
+**`shazam_overview` is ALREADY in your context.** It was auto-injected before you started reading. READ it. The project structure, top files, and hotspots are right there above this section. If you can see the overview output in your context — Do NOT call `shazam_overview`. If you do NOT see it — call it immediately. It is the single most important tool. You cannot work blind.
+
+Here are the other 8 tools. You MUST call them. Memorize them. Use them or fail.
+
+| Tool | What it does | You MUST call it when |
+|------|-------------|----------------------|
+| `shazam_lookup` | Symbol/file details — hover info, type hierarchy, callers, callees | You need to understand any symbol or file |
+| `shazam_impact` | Blast radius — every file, symbol, and test affected by your change | BEFORE editing shared or exported modules. Do NOT guess what you'll break. |
+| `shazam_verify` | Post-edit gate — LSP diagnostics, graph analysis, PASS/WARN/FAIL | AFTER every write. Run it. Read the verdict. If it says FAIL or WARN, fix it NOW. |
+| `shazam_changes` | Git change summary with symbol-level detail and risk level | You edited things and need to know what actually changed |
+| `shazam_format` | Auto-fix formatting — supports multiple formatters | `shazam_verify` reports format errors |
+| `shazam_find_tests` | Discover test files, test functions, where new tests belong | Adding tests or modifying code that has tests |
+| `shazam_rename_symbol` | Cross-file symbol rename with atomic writes and safety gate | Renaming ANY symbol. Do NOT manually find-and-replace. |
+| `shazam_safe_delete` | Check for zero incoming references before deletion | Removing any exported symbol. Do NOT delete blind. |
+
+If a tool errors or is unavailable, try once more, then work around it. But you MUST try it first. These tools are the difference between a working change and a broken build.
+
 ## When to Read Rules Files
 
-- Read `rules/LOCAL_CI.md` before every push. Run ALL checks. Failing any = broken commit. GitHub Actions (`.github/workflows/ci.yml`) is the comprehensive authority.
-- Read `rules/OPS.md` before any release. Contains build → bundle → tag → release procedures.
-- Read `rules/LLM-REVIEW-GUIDE.md` before performing a code review on this project.
-- Read `rules/CODING.md` before writing or modifying code.
-- Read `rules/TESTING.md` before writing or modifying tests.
-- Read `rules/DEBUGGING.md` before debugging issues.
-- Read `rules/API-RULES.md` before designing or modifying CLI flags or output formats.
-- Read `rules/DATA-STATE.md` before working with data, cache, or file persistence.
-- Read `rules/VERIFICATION.md` before marking work complete.
-- Read `rules/ERROR-HANDLING.md` before handling errors or boundary cases.
-- Read `rules/LOGGING.md` before adding logs or debugging output.
-- Read `rules/SECURITY.md` before handling authentication, tokens, or security-sensitive code.
-- Read `rules/DEPENDENCIES.md` before adding, updating, or removing dependencies.
+- Run `bash scripts/ci.sh` before every push. All checks must pass. GitHub Actions (`.github/workflows/ci.yml`) is the comprehensive authority.
+- Read `rules/CODING.md` before writing or modifying code — project-specific conventions and error handling patterns.
+- Read `rules/REVIEW-RULES.md` before performing a code review on this project. NEVER submit findings that violate the DO NOT REPORT rules.
 - Read `rules/ARCHITECTURE.md` before making architectural decisions.
-- Read `rules/PERFORMANCE.md` before optimizing performance or profiling.
 - Read `README.md` for user-facing reference only. NEVER duplicate its content in AGENTS.md.
-- Read `rules/OPS.md` for the full 7-phase release workflow. NEVER guess release commands.
 
 ## Project Snapshot
 
@@ -192,23 +201,11 @@ Trigger only when the task or milestone is fully completed:
 | `trace` | `--limit` | 100 | Max results to return |
 | `data` | `--limit` | 50 | Max data entries to return |
 
-## Development Environment
-
-- **Rust**: 1.85+ (2024 edition). Install via `rustup`.
-- **Dependencies**: all in `Cargo.toml` — `clap`, `ignore`, `regex`, `serde`/`serde_json`, `walkdir`, `anyhow`, `thiserror`, `log`/`env_logger`, `minreq` (sync HTTP), `tree-sitter` + grammars, `rayon` (parallel scan + remote downloads)
-- **No external services**, no ports, no env vars required (optional `GITHUB_TOKEN` for remote mode)
-- **Clean reset**: `cargo clean && cargo build`
+> Requires Rust 1.85+ (2024 edition). Optional `GITHUB_TOKEN` env var for remote mode. Clean reset: `cargo clean && cargo build`.
 
 ## Architecture
 
-Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `scan` (3-phase tree-sitter pipeline with `CompiledQueries` caching in `scan/parser.rs` — serial I/O → per-language Query compilation → rayon parallel parsing), `output` (Markdown + JSON formatting), `remote` (parallel file downloads via rayon `par_iter` on `raw.githubusercontent.com`), `git` (reserved for future git-based analysis).
-
-## Core Flows
-
-1. **find-how**: CLI args → `FileFinder::walk()` (respects `.gitignore`) → keyword scoring → 3-phase scan pipeline (serial I/O collection → per-language `CompiledQueries` compilation → rayon parallel tree-sitter parsing) → `extract_matching_lines()` → `OutputWriter::write_markdown()` → `.inspect/` file
-2. **Remote mode**: `--repo owner/repo` → `remote::prepare()` → GitHub API tree fetch → rayon `par_iter` parallel raw file downloads via `raw.githubusercontent.com` → cache → then same local analysis pipeline
-3. **Skill usage**: Agent spawns subagent → subagent runs `scripts/repo-inspect find-how "query"` → binary writes `.inspect/` → main agent reads `.inspect/` file
-4. **Build & bundle**: `cargo build --release` → `cp target/release/repo-inspect skills/repo-inspect/scripts/` → commit
+Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`, `overview`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `scan` (3-phase tree-sitter pipeline with `CompiledQueries` caching in `scan/parser.rs` — serial I/O → per-language Query compilation → rayon parallel parsing), `output` (Markdown + JSON formatting), `remote` (parallel file downloads via rayon `par_iter` on `raw.githubusercontent.com`), `git` (reserved for future git-based analysis).
 
 ## Change Map
 
@@ -220,19 +217,6 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | Update CLI args | `src/cli.rs` | `cargo run -- --help` |
 | Update dependencies | `Cargo.toml` | `cargo build --release` + binary size check |
 | Modify remote mode | `src/remote/mod.rs` | `--repo gjczone/repo-inspect find-how "test"` (cached + fresh) |
-
-## Verification Matrix
-
-| Check | Command | Pass criteria |
-|-------|---------|---------------|
-| Format | `cargo fmt --check` | No diff |
-| Clippy | `cargo clippy -- -D warnings` | Exit 0, zero warnings |
-| Build | `cargo build --release` | Exit 0 |
-| Test | `cargo test` | Exit 0, 0 failed |
-| Binary size | `ls -lh target/release/repo-inspect` | < 6 MB |
-| find-how smoke | `cargo run -- --repo . find-how "test" --depth 1` | Exit 0, output in `.inspect/` |
-| overview smoke | `cargo run -- --repo . overview` | Exit 0, output in `.inspect/` |
-| Remote smoke | `./target/release/repo-inspect --repo gjczone/repo-inspect find-how "test"` | Exit 0 (requires GITHUB_TOKEN) |
 
 ## First Places to Inspect
 
@@ -247,36 +231,12 @@ Single binary with command-based routing. Each subcommand (`find-how`, `trace`, 
 | "How does remote mode work?" | `src/remote/mod.rs` (prepare, fetch_tree, fetch_raw_file, caching) |
 | "How does scan/parsing work?" | `src/scan/parser.rs` (CompiledQueries, 3-phase pipeline) |
 
-## Coding Rules
-
-See `rules/CODING.md`. Key anchors: NEVER add deps without justification. NEVER leave `unwrap()` on fallible ops. CLI interface IS the API — never break backward compat.
-
-## Testing Rules
-
-See `rules/TESTING.md`. Key anchors: one test per subcommand minimum. Use `--repo .` as test data. Smoke test every subcommand.
-
-## Debugging Rules
-
-See `rules/DEBUGGING.md`. Key anchors: use `log` crate, not `eprintln!`. Run with `RUST_LOG=debug`. Check stderr for anyhow error chain.
-
-## API Rules
-
-See `rules/API-RULES.md`. Key anchors: CLI = API. Output filenames: `<command>.md` when no filter (e.g. `entries.md`, `hotspots.md`, `data.md`, `patterns.md`); `<command>-<sanitized-filter>.md` with filter (e.g. `data-RepoSpec.md`, `patterns-concurrency.md`). `--output json` must be valid. `out_dir` resolves relative to repo dir (not cwd) by default.
-
-## Data & State Rules
-
-See `rules/DATA-STATE.md`. Key anchors: binary is stateless. `.inspect/` output only. Remote cache: `~/.cache/repo-inspect/remote/`.
-
-## Verification Before Completion
-
-See `rules/VERIFICATION.md`. Run ALL checks: `cargo fmt --check && cargo clippy -- -D warnings && cargo build --release && cargo test` + smoke + binary update + docs sync.
-
 ## Agent Checklist
 
-- [ ] Read `rules/LOCAL_CI.md` before every push — run ALL checks
-- [ ] Read `rules/VERIFICATION.md` before marking work complete
+- [ ] Run `bash scripts/ci.sh` before every push — run ALL checks
 - [ ] Read `rules/CODING.md` before writing code
-- [ ] Read `rules/DEPENDENCIES.md` before adding/updating deps
+- [ ] Read `rules/REVIEW-RULES.md` before code review
+- [ ] Read `rules/ARCHITECTURE.md` before making architectural decisions
 - [ ] Address user as 老板 — user-system-rules.md
 - [ ] Completion report format: 做了什么 / 结果 / 已确认 / 需要你决策 / 待跟进 — user-system-rules.md
 - [ ] NEVER skip `cargo fmt --check && cargo clippy -- -D warnings` before commit
