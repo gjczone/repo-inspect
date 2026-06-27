@@ -55,14 +55,7 @@ Fetches file trees and raw files via GitHub API. Set `GITHUB_TOKEN` to avoid rat
 
 ## Supported Languages
 
-| Language | Tree-sitter parsing |
-|----------|-------------------|
-| Rust | ✓ |
-| Python | ✓ |
-| TypeScript | ✓ |
-| Go | ✓ |
-
-Other languages work with text-level search even without tree-sitter grammar support.
+Rust, Python, TypeScript, Go — with tree-sitter structured parsing. All other languages work via text-level search.
 
 ## Credits
 
