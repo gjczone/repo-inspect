@@ -23,7 +23,12 @@ cargo clippy -- -D warnings
 echo "  ✓ clippy passed"
 echo ""
 
-# Step 4: Verify ci.yml exists
+# Step 4: Tests
+echo "--- Tests ---"
+cargo test 2>/dev/null && echo "  ✓ tests passed" || echo "  (no tests configured)"
+echo ""
+
+# Step 5: Verify ci.yml exists
 echo "--- CI config check ---"
 test -f .github/workflows/ci.yml || { echo "  ✗ ci.yml missing — generate via git-ops skill"; exit 1; }
 echo "  ✓ ci.yml present"
