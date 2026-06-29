@@ -11,6 +11,9 @@ use serde::Deserialize;
 const API_BASE: &str = "https://api.github.com";
 const USER_AGENT: &str = "repo-inspect/0.1.0";
 
+/// Maximum characters of error response body to include in user-facing messages.
+const MAX_ERROR_BODY_CHARS: usize = 200;
+
 // ─── API response types ──────────────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -30,6 +33,11 @@ struct SearchItem {
 #[derive(Deserialize)]
 struct TextMatch {
     fragment: String,
+}
+
+#[derive(Deserialize)]
+struct RateLimitResponse {
+    message: Option<String>,
 }
 
 // ─── public types ────────────────────────────────────────────────────────────
@@ -121,8 +129,8 @@ pub fn search_code(
 
 /// Perform a GET request against the GitHub Search API.
 ///
-/// Handles rate limiting specially: returns empty results on 403 (rate limit)
-/// instead of erroring, so callers can fall back to full download.
+/// Rate limit detection uses HTTP status code + JSON response parsing,
+/// not fragile substring matching. Error messages are truncated.
 fn api_get_search(url: &str, token: Option<&str>) -> anyhow::Result<String> {
     let mut req = minreq::get(url)
         .with_header("User-Agent", USER_AGENT)
@@ -146,13 +154,26 @@ fn api_get_search(url: &str, token: Option<&str>) -> anyhow::Result<String> {
         }
         403 => {
             // Search API 速率限制 — 返回空结果而不是错误
+            // 使用 JSON 解析检测速率限制，而非脆弱字符串匹配
             let body_str = resp.as_str().unwrap_or("");
-            if body_str.contains("rate limit") || body_str.contains("secondary rate limit") {
+            let is_rate_limit = if let Ok(rate) =
+                serde_json::from_str::<RateLimitResponse>(body_str)
+                && let Some(msg) = rate.message
+            {
+                msg.to_lowercase().contains("rate limit")
+            } else {
+                false
+            };
+
+            if is_rate_limit {
                 debug!("Search API rate limited, returning empty results");
                 // 返回空 JSON 数组，让调用方降级
                 Ok(r#"{"total_count":0,"items":[]}"#.to_string())
             } else {
-                bail!("GitHub API returned 403 Forbidden: {}", body_str);
+                bail!(
+                    "GitHub API returned 403 Forbidden: {}",
+                    truncate_body(body_str)
+                );
             }
         }
         422 => {
@@ -174,9 +195,31 @@ fn api_get_search(url: &str, token: Option<&str>) -> anyhow::Result<String> {
                 "GitHub API returned HTTP {} for {}: {}",
                 other,
                 sanitize_url(url),
-                body
+                truncate_body(body)
             );
         }
+    }
+}
+
+/// Truncate a response body to a safe length for user-facing error messages.
+/// If the body is valid JSON, extract only the `message` field.
+fn truncate_body(body: &str) -> String {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        message: Option<String>,
+    }
+
+    if let Ok(err) = serde_json::from_str::<ErrorBody>(body)
+        && let Some(msg) = err.message
+    {
+        return msg;
+    }
+
+    if body.len() <= MAX_ERROR_BODY_CHARS {
+        body.to_string()
+    } else {
+        format!("{}...", &body[..MAX_ERROR_BODY_CHARS])
     }
 }
 

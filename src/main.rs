@@ -26,8 +26,10 @@ fn main() -> Result<()> {
     //   Tier 1 (lightweight): overview — 只拉元数据，零源文件下载
     //   Tier 2 (selective): find-how / trace — Search API 定位 + 按需下载
     //   Tier 3 (full): 其他命令 / --full 标志 — 全量下载全部源文件
+    let is_remote;
     let repo: PathBuf = match &args.repo {
         RepoSpec::Local(path) => {
+            is_remote = false;
             if !path.exists() {
                 anyhow::bail!(
                     "仓库路径不存在: {}。对于远程仓库，请使用 owner/repo 格式。",
@@ -37,6 +39,7 @@ fn main() -> Result<()> {
             path.clone()
         }
         RepoSpec::Remote { owner, repo } => {
+            is_remote = true;
             if args.full {
                 // --full 强制全量下载（Tier 3），跳过渐进式扫描
                 remote::prepare(owner, repo, args.refresh)?
@@ -65,10 +68,15 @@ fn main() -> Result<()> {
         }
     };
 
-    // 默认 .inspect/ 写入目标 repo 目录内，而非当前工作目录。
-    // 用户显式指定绝对路径时尊重其选择。
+    // 默认 .inspect/ 写入目标目录。
+    // 本地模式：写入 repo 目录内（保持原有行为）。
+    // 远程模式：写入当前工作目录，而非缓存目录深处。
     let out_dir = if args.out_dir.is_relative() {
-        repo.join(&args.out_dir)
+        if is_remote {
+            std::env::current_dir()?.join(&args.out_dir)
+        } else {
+            repo.join(&args.out_dir)
+        }
     } else {
         args.out_dir
     };
