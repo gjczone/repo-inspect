@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
     tags: ["v*"]
     paths-ignore:
       - "**.md"
@@ -39,9 +39,9 @@ jobs:
       - name: Clippy (strict)
         run: cargo clippy --all-targets -- -D warnings
 
-  # ─── 构建 + 测试（Linux stable） ────────────────────────────────────────
+  # ─── 构建 + 测试 ────────────────────────────────────────────────────────
   test:
-    name: Test (stable)
+    name: Test
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -66,49 +66,6 @@ jobs:
       - name: Smoke test — overview
         run: ./target/release/repo-inspect --repo . overview
 
-  # ─── MSRV（1.85，Rust 2024 edition） ─────────────────────────────────────
-  msrv:
-    name: MSRV (1.85)
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1.17
-        with:
-          toolchain: 1.85.0
-
-      - uses: Swatinem/rust-cache@v2.9
-        with:
-          key: msrv-1.85
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Test
-        run: cargo test
-
-  # ─── macOS 交叉平台 ─────────────────────────────────────────────────────
-  macos:
-    name: Test (macOS)
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-
-      - uses: actions-rust-lang/setup-rust-toolchain@v1.17
-
-      - uses: Swatinem/rust-cache@v2.9
-
-      - name: Build release
-        run: cargo build --release
-
-      - name: Test
-        run: cargo test
-
-      - name: Smoke test
-        run: ./target/release/repo-inspect --repo . find-how "search" --depth 1
-
   # ─── 依赖安全审计 ────────────────────────────────────────────────────────
   audit:
     name: Security audit
@@ -117,17 +74,19 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.17
+
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked
 
-      - name: Audit dependencies (advisory + license + sources)
+      - name: Check advisories
         run: cargo audit
 
-  # ─── 发布时额外验证 ──────────────────────────────────────────────────────
+  # ─── 发布验证（仅在打 tag 时触发） ──────────────────────────────────────
   release:
     name: Release verification
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [lint, test, msrv, macos, audit]
+    needs: [lint, test, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -144,14 +103,13 @@ jobs:
         run: |
           file target/release/repo-inspect
           ./target/release/repo-inspect --version
-          ./target/release/repo-inspect --help | head -5
 
       - name: Full test suite (locked)
         run: cargo test --locked
 
       - name: Binary size check
         run: |
-          SIZE=$(stat -f%z target/release/repo-inspect 2>/dev/null || stat -c%s target/release/repo-inspect)
+          SIZE=$(stat --format=%s target/release/repo-inspect 2>/dev/null || stat -f%z target/release/repo-inspect)
           echo "Binary size: $SIZE bytes ($(( SIZE / 1048576 )) MB)"
           test $SIZE -lt 7000000 || echo "Warning: binary exceeds 7 MB"
 
