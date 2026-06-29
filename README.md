@@ -8,12 +8,6 @@ An AI agent skill for reverse-engineering and researching open-source projects. 
 npx skills add https://github.com/gjczone/repo-inspect --skill repo-inspect
 ```
 
-The binary is also available via Cargo:
-
-```bash
-cargo install repo-inspect
-```
-
 ## What It Does
 
 repo-inspect is a **skill** that gives AI agents surgical access to any codebase. Instead of reading thousands of irrelevant lines, the agent asks a focused question and gets exactly the relevant code — ranked, with line numbers and context.

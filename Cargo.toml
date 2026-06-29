@@ -1,6 +1,6 @@
 [package]
 name = "repo-inspect"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Surgical codebase inspection CLI — find how features are implemented, trace symbols, detect patterns. Built for AI agents to quickly understand open-source projects."
 license = "MIT"
