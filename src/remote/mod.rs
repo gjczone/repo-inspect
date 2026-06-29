@@ -13,13 +13,13 @@
 //!
 //! | File               | Purpose                                |
 //! |--------------------|----------------------------------------|
-//! | `meta.json`        | fetch timestamp, branch, file count    |
+//! | `meta.json`        | fetch timestamp, branch, file count, mode |
 //! | `<path>`           | raw file content (repo-relative path)  |
 //!
 //! Pass `--refresh` to force a re-fetch even when the cache is still fresh.
 
 use anyhow::{Context, bail};
-use log::{debug, info};
+use log::{debug, info, warn};
 use rayon::prelude::*;
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -46,6 +46,12 @@ const MAX_FILES: usize = 5_000;
 
 /// User-Agent header required by GitHub API.
 const USER_AGENT: &str = "repo-inspect/0.1.0";
+
+/// Maximum characters of error response body to include in user-facing messages.
+const MAX_ERROR_BODY_CHARS: usize = 200;
+
+/// Threshold: if download error rate exceeds this, bail instead of producing incomplete results.
+const DOWNLOAD_ERROR_RATE_THRESHOLD: f64 = 0.10;
 
 // ─── API response types (minimal – only the fields we need) ─────────────────
 
@@ -107,6 +113,15 @@ struct CachedTreeItem {
 
 // ─── cache metadata ─────────────────────────────────────────────────────────
 
+/// Cache mode: lightweight (Tier 1, metadata only) or full (Tier 2/3, source files).
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Clone, Copy, Debug)]
+enum CacheMode {
+    #[serde(rename = "lightweight")]
+    Lightweight,
+    #[serde(rename = "full")]
+    Full,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct CacheMeta {
     fetched_at: u64,
@@ -116,6 +131,39 @@ struct CacheMeta {
     /// Key = repo-relative path, Value = Unix epoch seconds when downloaded.
     #[serde(default)]
     files: HashMap<String, u64>,
+    /// Cache mode: lightweight (Tier 1) or full (Tier 2/3).
+    /// Prevents lightweight cache from being mistaken for a valid full cache.
+    #[serde(default = "default_cache_mode")]
+    mode: CacheMode,
+}
+
+fn default_cache_mode() -> CacheMode {
+    CacheMode::Full
+}
+
+/// Error type distinguishing 404 from other HTTP errors for raw file fetches.
+#[derive(Debug)]
+enum RawFetchError {
+    NotFound,
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for RawFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RawFetchError::NotFound => write!(f, "File not found (404)"),
+            RawFetchError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for RawFetchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            RawFetchError::NotFound => None,
+            RawFetchError::Other(e) => Some(e.as_ref()),
+        }
+    }
 }
 
 // ─── public API ─────────────────────────────────────────────────────────────
@@ -154,8 +202,8 @@ pub fn parse_owner_repo(spec: &str) -> anyhow::Result<(String, String)> {
 pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf> {
     let cache_dir = cache_dir_path(owner, repo);
 
-    // 缓存命中（未要求刷新 且 TTL 未过期）
-    if !refresh && let Some(dir) = check_cache(&cache_dir) {
+    // 缓存命中（未要求刷新 且 TTL 未过期 且 缓存模式为 full）
+    if !refresh && let Some(dir) = check_cache(&cache_dir, Some(CacheMode::Full)) {
         info!(
             "Using cached remote files for {}/{}, cache dir: {}",
             owner,
@@ -248,6 +296,9 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
     // 5. 并行下载需要更新的文件
     let fetched = AtomicUsize::new(0);
     let errors = AtomicUsize::new(0);
+    let failed_paths: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    let total_to_download = need_download.len();
 
     let results: Vec<(&str, String)> = need_download
         .par_iter()
@@ -258,35 +309,68 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
                     Some((*rel_path, content))
                 }
                 Err(e) => {
-                    debug!("Failed to fetch {}: {}", rel_path, e);
                     errors.fetch_add(1, Ordering::Relaxed);
+                    if let Ok(mut paths) = failed_paths.lock()
+                        && paths.len() < 5
+                    {
+                        paths.push(rel_path.to_string());
+                    }
+                    warn!("Failed to fetch {}: {}", rel_path, e);
                     None
                 }
             }
         })
         .collect();
 
-    // 串行写入磁盘
+    let error_count = errors.load(Ordering::Relaxed);
+
+    // 检查下载错误率 — 超过阈值则报错而不是产出不完整结果
+    if total_to_download > 0 {
+        let error_rate = error_count as f64 / total_to_download as f64;
+        if error_rate > DOWNLOAD_ERROR_RATE_THRESHOLD {
+            let sample_paths = failed_paths
+                .lock()
+                .map(|p| p.join(", "))
+                .unwrap_or_default();
+            bail!(
+                "Failed to download {}/{} files ({:.0}%) for {}/{}. Sample failures: {}. \
+                 Check network connectivity and GitHub token validity.",
+                error_count,
+                total_to_download,
+                error_rate * 100.0,
+                owner,
+                repo,
+                sample_paths
+            );
+        }
+    }
+
+    if error_count > 0 {
+        eprintln!(
+            "Warning: {} download(s) failed for {}/{} — results may be incomplete",
+            error_count, owner, repo
+        );
+    }
+
+    // 串行写入磁盘（原子写入）
     for (rel_path, content) in &results {
-        let dest = cache_dir.join(rel_path);
+        let dest = safe_join(&cache_dir, rel_path)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, content)
-            .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
+        write_atomic(&dest, content)?;
         // 记录新下载文件的时间戳
         fresh_files.insert(rel_path.to_string(), now);
     }
 
     let fetched = fetched.load(Ordering::Relaxed) + skipped;
-    let errors = errors.load(Ordering::Relaxed);
 
     if fetched == 0 {
         bail!(
             "Failed to download any source files from {}/{}. {} fetch errors.",
             owner,
             repo,
-            errors
+            error_count
         );
     }
 
@@ -294,7 +378,7 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         "Fetched {} files (new), {} skipped, {} errors for {}/{}",
         fetched - skipped,
         skipped,
-        errors,
+        error_count,
         owner,
         repo
     );
@@ -305,6 +389,7 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         branch: branch.clone(),
         file_count: fetched,
         files: fresh_files,
+        mode: CacheMode::Full,
     };
 
     write_cache_meta(&cache_dir, &meta)?;
@@ -326,11 +411,15 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
 ///
 /// Fetches: file tree (paths + sizes), README, config files, recent commits.
 /// This is Tier 1 of the progressive remote scanning architecture.
+///
+/// Does NOT delete the entire cache directory — only overwrites lightweight-specific
+/// files (tree.json, README.md, commits.json, configs), preserving any source files
+/// downloaded by Tier 2/3 operations.
 pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf> {
     let cache_dir = cache_dir_path(owner, repo);
 
     // 缓存命中（未要求刷新 且 TTL 未过期）
-    if !refresh && let Some(dir) = check_cache(&cache_dir) {
+    if !refresh && let Some(dir) = check_cache(&cache_dir, None) {
         info!("Using cached lightweight metadata for {}/{}", owner, repo);
         eprintln!(
             "Using cached metadata for {}/{} → {}",
@@ -357,11 +446,31 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
     let config_files = fetch_config_files(owner, repo, &branch);
     let commits = fetch_recent_commits(owner, repo, token.as_deref());
 
-    // 4. 清理旧缓存并创建目录
-    if cache_dir.exists() {
-        fs::remove_dir_all(&cache_dir)
-            .with_context(|| format!("Failed to clear cache directory: {}", cache_dir.display()))?;
+    // 4. 清理仅 lightweight 相关的文件，保留源文件（不调用 remove_dir_all）
+    let lightweight_files = ["tree.json", "README.md", "commits.json"];
+    for fname in &lightweight_files {
+        let path = cache_dir.join(fname);
+        if path.exists()
+            && let Err(e) = fs::remove_file(&path)
+        {
+            debug!(
+                "Failed to remove old lightweight file {}: {}",
+                path.display(),
+                e
+            );
+        }
     }
+
+    // 也清理旧配置文件缓存
+    let config_names = ["Cargo.toml", "package.json", "go.mod", "pyproject.toml"];
+    for fname in &config_names {
+        let path = cache_dir.join(fname);
+        if path.exists() {
+            let _ = fs::remove_file(&path);
+        }
+    }
+
+    // 确保缓存目录存在
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
@@ -376,17 +485,18 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
         .collect();
     let tree_json =
         serde_json::to_string_pretty(&cached_tree).context("Failed to serialize tree")?;
-    fs::write(cache_dir.join("tree.json"), tree_json).context("Failed to write tree cache")?;
+    write_atomic(&cache_dir.join("tree.json"), &tree_json).context("Failed to write tree cache")?;
 
     // 6. 写入 README
     if let Ok(Some(content)) = readme {
-        fs::write(cache_dir.join("README.md"), content).context("Failed to write README cache")?;
+        write_atomic(&cache_dir.join("README.md"), &content)
+            .context("Failed to write README cache")?;
     }
 
     // 7. 写入配置文件
     if let Ok(configs) = config_files {
         for (filename, content) in &configs {
-            fs::write(cache_dir.join(filename), content)
+            write_atomic(&cache_dir.join(filename), content)
                 .with_context(|| format!("Failed to write config cache: {}", filename))?;
         }
     }
@@ -395,7 +505,7 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
     if let Ok(commits) = commits {
         let commits_json =
             serde_json::to_string_pretty(&commits).context("Failed to serialize commits")?;
-        fs::write(cache_dir.join("commits.json"), commits_json)
+        write_atomic(&cache_dir.join("commits.json"), &commits_json)
             .context("Failed to write commits cache")?;
     }
 
@@ -407,6 +517,7 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
         branch: branch.clone(),
         file_count: tree.len(),
         files: HashMap::new(),
+        mode: CacheMode::Lightweight,
     };
     write_cache_meta(&cache_dir, &meta)?;
 
@@ -506,11 +617,21 @@ pub fn fetch_recent_commits(
 // ─── cache helpers ──────────────────────────────────────────────────────────
 
 /// Get current Unix timestamp in seconds.
+///
+/// Logs a warning if the system clock is before Unix epoch (clock error),
+/// then returns 0 to force cache refresh rather than silently serving stale data.
 fn now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(d) => d.as_secs(),
+        Err(e) => {
+            eprintln!(
+                "Warning: system clock appears to be before Unix epoch ({}). \
+                 Cache will be refreshed. Check system time.",
+                e
+            );
+            0
+        }
+    }
 }
 
 /// Compute the cache directory path for a given owner/repo.
@@ -530,18 +651,22 @@ fn read_cache_meta(dir: &Path) -> anyhow::Result<CacheMeta> {
     serde_json::from_str(&content).context("Failed to parse cache metadata")
 }
 
-/// Write cache metadata to a cache directory.
+/// Write cache metadata to a cache directory using atomic write.
 fn write_cache_meta(dir: &Path, meta: &CacheMeta) -> anyhow::Result<()> {
     let meta_json =
         serde_json::to_string_pretty(meta).context("Failed to serialize cache metadata")?;
-    fs::write(dir.join("meta.json"), meta_json).context("Failed to write cache metadata")?;
+    write_atomic(&dir.join("meta.json"), &meta_json).context("Failed to write cache metadata")?;
     Ok(())
 }
 
 /// Check whether a cached directory is still fresh.
 ///
 /// Returns `Some(path)` if the cache exists and is within TTL, `None` otherwise.
-fn check_cache(dir: &Path) -> Option<PathBuf> {
+/// If `required_mode` is provided, also verifies the cache mode matches.
+///
+/// Uses `checked_sub` to detect backward clock skew — if the system clock moved
+/// backward, the cache is treated as expired and a warning is emitted.
+fn check_cache(dir: &Path, required_mode: Option<CacheMode>) -> Option<PathBuf> {
     let meta_path = dir.join("meta.json");
     if !meta_path.exists() {
         return None;
@@ -551,13 +676,38 @@ fn check_cache(dir: &Path) -> Option<PathBuf> {
 
     let now = now_secs();
 
-    // 检查 TTL
-    if now.saturating_sub(meta.fetched_at) > CACHE_TTL.as_secs() {
+    // 检查缓存模式是否匹配
+    if let Some(req_mode) = required_mode
+        && meta.mode != req_mode
+    {
         debug!(
-            "Cache expired for {} (age: {}s, ttl: {}s)",
+            "Cache mode mismatch for {}: expected {:?}, got {:?}",
             dir.display(),
-            now - meta.fetched_at,
-            CACHE_TTL.as_secs()
+            req_mode,
+            meta.mode
+        );
+        return None;
+    }
+
+    // 检查 TTL — 使用 checked_sub 检测时钟倒退
+    if let Some(age) = now.checked_sub(meta.fetched_at) {
+        if age > CACHE_TTL.as_secs() {
+            debug!(
+                "Cache expired for {} (age: {}s, ttl: {}s)",
+                dir.display(),
+                age,
+                CACHE_TTL.as_secs()
+            );
+            return None;
+        }
+    } else {
+        // 时钟倒退：fetched_at 在未来，数据可能任意旧，强制刷新
+        eprintln!(
+            "Warning: cache timestamp for {} appears to be in the future (fetched_at={}, now={}). \
+             System clock may have moved backward. Forcing cache refresh.",
+            dir.display(),
+            meta.fetched_at,
+            now
         );
         return None;
     }
@@ -595,22 +745,34 @@ pub fn ensure_cached(owner: &str, repo: &str, branch: &str, path: &str) -> anyho
     let token = std::env::var("GITHUB_TOKEN").ok();
     let content = fetch_raw_file(owner, repo, branch, path, token.as_deref())?;
 
-    // 写入磁盘
+    // 写入磁盘（原子写入）
     if let Some(parent) = dest.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::write(&dest, &content)
+    write_atomic(&dest, &content)
         .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
 
-    // 更新元数据
-    let mut meta = read_cache_meta(&cache_dir).unwrap_or(CacheMeta {
-        fetched_at: now,
-        branch: branch.to_string(),
-        file_count: 0,
-        files: HashMap::new(),
-    });
+    // 更新元数据 — 如果 meta 损坏，不静默替换为空默认值；
+    // 而是尝试重建：保留已有文件记录，只添加新文件
+    let mut meta = match read_cache_meta(&cache_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!(
+                "Failed to read cache meta for {}/{} ({}), starting fresh for this file only",
+                owner, repo, e
+            );
+            CacheMeta {
+                fetched_at: now,
+                branch: branch.to_string(),
+                file_count: 0,
+                files: HashMap::new(),
+                mode: CacheMode::Full,
+            }
+        }
+    };
     meta.files.insert(path.to_string(), now);
     meta.file_count = meta.files.len();
+    meta.mode = CacheMode::Full;
     write_cache_meta(&cache_dir, &meta)?;
 
     Ok(dest)
@@ -632,7 +794,7 @@ pub fn prepare_selective(
     let cache_dir = cache_dir_path(owner, repo);
 
     // 如果缓存完整且新鲜，直接返回
-    if !refresh && let Some(dir) = check_cache(&cache_dir) {
+    if !refresh && let Some(dir) = check_cache(&cache_dir, Some(CacheMode::Full)) {
         eprintln!(
             "Using cached files for {}/{} → {}",
             owner,
@@ -655,12 +817,19 @@ pub fn prepare_selective(
     // 2. 确保缓存目录存在并初始化 meta
     fs::create_dir_all(&cache_dir)
         .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
-    let mut meta = read_cache_meta(&cache_dir).unwrap_or(CacheMeta {
-        fetched_at: now_secs(),
-        branch: branch.clone(),
-        file_count: 0,
-        files: HashMap::new(),
-    });
+    let mut meta = match read_cache_meta(&cache_dir) {
+        Ok(m) => m,
+        Err(e) => {
+            debug!("Failed to read cache meta ({}), starting fresh", e);
+            CacheMeta {
+                fetched_at: now_secs(),
+                branch: branch.clone(),
+                file_count: 0,
+                files: HashMap::new(),
+                mode: CacheMode::Full,
+            }
+        }
+    };
 
     // 3. 使用 Search API 定位匹配文件
     let search_results = match search::search_code(owner, repo, query, token.as_deref()) {
@@ -699,7 +868,10 @@ pub fn prepare_selective(
     );
 
     let fetched = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
     let now = now_secs();
+
+    let total = to_download.len();
 
     let results: Vec<(&str, String)> = to_download
         .par_iter()
@@ -710,26 +882,51 @@ pub fn prepare_selective(
                     Some((*rel_path, content))
                 }
                 Err(e) => {
-                    debug!("Failed to fetch {}: {}", rel_path, e);
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    warn!("Failed to fetch {}: {}", rel_path, e);
                     None
                 }
             }
         })
         .collect();
 
+    let error_count = errors.load(Ordering::Relaxed);
+
+    if total > 0 {
+        let error_rate = error_count as f64 / total as f64;
+        if error_rate > DOWNLOAD_ERROR_RATE_THRESHOLD {
+            bail!(
+                "Failed to download {}/{} files ({:.0}%) for {}/{}. \
+                 Check network connectivity and GitHub token.",
+                error_count,
+                total,
+                error_rate * 100.0,
+                owner,
+                repo
+            );
+        }
+    }
+
+    if error_count > 0 {
+        eprintln!(
+            "Warning: {} download(s) failed for {}/{} — results may be incomplete",
+            error_count, owner, repo
+        );
+    }
+
     for (rel_path, content) in &results {
-        let dest = cache_dir.join(rel_path);
+        let dest = safe_join(&cache_dir, rel_path)?;
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, content)
-            .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
+        write_atomic(&dest, content)?;
         meta.files.insert(rel_path.to_string(), now);
     }
 
     let count = fetched.load(Ordering::Relaxed);
     meta.file_count = meta.files.len();
     meta.fetched_at = now;
+    meta.mode = CacheMode::Full;
     write_cache_meta(&cache_dir, &meta)?;
 
     eprintln!(
@@ -806,7 +1003,9 @@ fn get_file_tree(
 /// Fetch the raw content of a single file from a repository.
 ///
 /// Uses `raw.githubusercontent.com` which does not count against API rate limits.
-/// Falls back to the authenticated Contents API if the raw URL returns 404.
+/// Falls back to the authenticated Contents API only if the raw URL returns 404
+/// (file not found). Network errors, timeouts, and server errors are propagated
+/// immediately without consuming API rate limits.
 fn fetch_raw_file(
     owner: &str,
     repo: &str,
@@ -817,14 +1016,21 @@ fn fetch_raw_file(
     // 首选：raw.githubusercontent.com（不计入 API 速率限制）
     let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, path);
 
-    match http_get_raw(&raw_url, token) {
+    match http_get_raw_discriminated(&raw_url, token) {
         Ok(body) => return Ok(body),
-        Err(e) => {
-            debug!("raw URL failed for {}: {}", path, e);
+        Err(RawFetchError::NotFound) => {
+            debug!(
+                "raw URL returned 404 for {}, falling back to Contents API",
+                path
+            );
+        }
+        Err(RawFetchError::Other(e)) => {
+            // 网络错误、超时、5xx 等 — 直接传播，不消耗 API 配额
+            return Err(e).with_context(|| format!("Failed to fetch raw file: {}", path));
         }
     }
 
-    // 回退：GitHub Contents API（需要认证以获取更高限额）
+    // 仅在 404 时回退：GitHub Contents API（需要认证以获取更高限额）
     let api_url = format!(
         "{}/repos/{}/{}/contents/{}?ref={}",
         API_BASE, owner, repo, path, branch
@@ -839,20 +1045,35 @@ fn fetch_raw_file(
 /// Simple GET request returning the response body, or an error for non-200/404.
 /// Returns the body as String on 200, returns Err on 404 or other failures.
 fn http_get_raw(url: &str, token: Option<&str>) -> anyhow::Result<String> {
+    match http_get_raw_discriminated(url, token) {
+        Ok(body) => Ok(body),
+        Err(RawFetchError::NotFound) => bail!("File not found (404)"),
+        Err(RawFetchError::Other(e)) => Err(e),
+    }
+}
+
+/// Like http_get_raw but distinguishes 404 from other errors.
+fn http_get_raw_discriminated(url: &str, token: Option<&str>) -> Result<String, RawFetchError> {
     let mut req = minreq::get(url).with_header("User-Agent", USER_AGENT);
     if let Some(t) = token {
         req = req.with_header("Authorization", format!("Bearer {}", t));
     }
-    let resp = req
-        .send()
-        .with_context(|| format!("HTTP request failed: GET {}", sanitize_url(url)))?;
+    let resp = req.send().map_err(|e| {
+        RawFetchError::Other(anyhow::anyhow!(
+            "HTTP request failed: GET {}: {}",
+            sanitize_url(url),
+            e
+        ))
+    })?;
     match resp.status_code {
         200 => Ok(resp
             .as_str()
-            .context("Failed to read response body")?
+            .map_err(|e| {
+                RawFetchError::Other(anyhow::anyhow!("Failed to read response body: {}", e))
+            })?
             .to_string()),
-        404 => bail!("File not found (404)"),
-        other => bail!("HTTP {}", other),
+        404 => Err(RawFetchError::NotFound),
+        other => Err(RawFetchError::Other(anyhow::anyhow!("HTTP {}", other))),
     }
 }
 
@@ -866,6 +1087,9 @@ fn api_get(url: &str, token: Option<&str>) -> anyhow::Result<String> {
 /// Perform a GET request with a custom Accept header.
 ///
 /// Handles authentication, rate-limiting, and error responses.
+/// Rate limit detection uses HTTP status code + JSON response parsing,
+/// not fragile substring matching. Error messages are truncated to avoid
+/// leaking large response bodies.
 fn api_get_with_accept(url: &str, token: Option<&str>, accept: &str) -> anyhow::Result<String> {
     let mut req = minreq::get(url)
         .with_header("User-Agent", USER_AGENT)
@@ -899,15 +1123,26 @@ fn api_get_with_accept(url: &str, token: Option<&str>, accept: &str) -> anyhow::
             );
         }
         403 => {
-            // 通常是速率限制
+            // 速率限制检测：优先解析 JSON 响应中的 message 字段
             let body_str = resp.as_str().unwrap_or("");
-            if body_str.contains("rate limit") || body_str.contains("secondary rate limit") {
+            let is_rate_limit = if let Ok(rate) =
+                serde_json::from_str::<RateLimitResponse>(body_str)
+                && let Some(msg) = rate.message
+            {
+                msg.to_lowercase().contains("rate limit")
+            } else {
+                false
+            };
+
+            if is_rate_limit {
                 bail!(
-                    "GitHub API rate limit exceeded. Set GITHUB_TOKEN to increase limits, or wait and try again. Details: {}",
-                    body_str
+                    "GitHub API rate limit exceeded. Set GITHUB_TOKEN to increase limits, or wait and try again."
                 );
             }
-            bail!("GitHub API returned 403 Forbidden: {}", body_str);
+            bail!(
+                "GitHub API returned 403 Forbidden: {}",
+                truncate_body(body_str)
+            );
         }
         404 => {
             bail!(
@@ -920,9 +1155,26 @@ fn api_get_with_accept(url: &str, token: Option<&str>, accept: &str) -> anyhow::
                 "GitHub API returned HTTP {} for {}: {}",
                 other,
                 sanitize_url(url),
-                body
+                truncate_body(body)
             );
         }
+    }
+}
+
+/// Truncate a response body to a safe length for user-facing error messages.
+/// If the body is valid JSON, extract only the `message` field.
+fn truncate_body(body: &str) -> String {
+    // 尝试解析 JSON 并只提取 message 字段
+    if let Ok(rate) = serde_json::from_str::<RateLimitResponse>(body)
+        && let Some(msg) = rate.message
+    {
+        return msg;
+    }
+
+    if body.len() <= MAX_ERROR_BODY_CHARS {
+        body.to_string()
+    } else {
+        format!("{}...", &body[..MAX_ERROR_BODY_CHARS])
     }
 }
 
@@ -935,6 +1187,92 @@ fn sanitize_url(url: &str) -> String {
     } else {
         format!("{}...", &url[..77])
     }
+}
+
+// ─── path safety ────────────────────────────────────────────────────────────
+
+/// Safely join a relative path to a base directory, preventing path traversal.
+///
+/// Rejects absolute paths and paths containing `..` components that would escape
+/// the base directory.
+fn safe_join(base: &Path, rel: &str) -> anyhow::Result<PathBuf> {
+    use std::path::Component;
+
+    // 拒绝绝对路径
+    if Path::new(rel).is_absolute() {
+        bail!(
+            "Rejected absolute path from remote file tree: \"{}\". This may indicate a malicious repository.",
+            rel
+        );
+    }
+
+    // 规范化 rel 的 components：解析 `.` 和 `..`
+    let mut stack: Vec<&str> = Vec::new();
+    for comp in Path::new(rel).components() {
+        match comp {
+            Component::ParentDir => {
+                if stack.pop().is_none() {
+                    // `..` 超出当前目录 — 相对路径正在逃逸 base
+                    bail!(
+                        "Path traversal detected: \"{}\" resolves outside cache directory. \
+                         This may indicate a malicious repository.",
+                        rel
+                    );
+                }
+            }
+            Component::CurDir => {}
+            Component::Normal(s) => {
+                stack.push(s.to_str().unwrap_or(""));
+            }
+            _ => {
+                bail!("Unexpected path component in remote file tree: \"{}\"", rel);
+            }
+        }
+    }
+
+    // 构建安全的 joined path
+    let mut result = base.to_path_buf();
+    for comp in stack {
+        result.push(comp);
+    }
+    Ok(result)
+}
+
+/// Write content to a file atomically using a temp file + rename pattern.
+///
+/// Prevents partial/corrupted writes from being served as valid cache data.
+fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
+    let _parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Cannot write to root path: {}", path.display()))?;
+
+    // 创建临时文件
+    let mut tmp = path.to_path_buf();
+    tmp.set_extension(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| format!("{}.tmp", e))
+            .unwrap_or_else(|| "tmp".to_string()),
+    );
+
+    // 如果已有同名临时文件，先删除
+    if tmp.exists() {
+        let _ = fs::remove_file(&tmp);
+    }
+
+    fs::write(&tmp, content)
+        .with_context(|| format!("Failed to write temp file: {}", tmp.display()))?;
+
+    // 原子重命名
+    fs::rename(&tmp, path).with_context(|| {
+        format!(
+            "Failed to rename temp file {} → {}",
+            tmp.display(),
+            path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 // ─── source file detection ──────────────────────────────────────────────────
@@ -1086,6 +1424,40 @@ mod tests {
     #[test]
     fn test_check_cache_nonexistent() {
         let dir = PathBuf::from("/tmp/nonexistent-cache-test-dir");
-        assert!(check_cache(&dir).is_none());
+        assert!(check_cache(&dir, None).is_none());
+    }
+
+    #[test]
+    fn test_safe_join_normal_path() {
+        let base = PathBuf::from("/tmp/test-cache");
+        let result = safe_join(&base, "src/main.rs").unwrap();
+        assert!(result.starts_with("/tmp/test-cache"));
+    }
+
+    #[test]
+    fn test_safe_join_rejects_absolute() {
+        let base = PathBuf::from("/tmp/test-cache");
+        assert!(safe_join(&base, "/etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_safe_join_rejects_traversal() {
+        let base = PathBuf::from("/tmp/test-cache");
+        assert!(safe_join(&base, "../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn test_write_atomic_roundtrip() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("repo-inspect-test-write-atomic");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("test.txt");
+        write_atomic(&path, "hello").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "hello");
+        // 临时文件不应残留
+        let tmp_path = dir.join("test.tmp");
+        assert!(!tmp_path.exists());
+        let _ = fs::remove_dir_all(&dir);
     }
 }

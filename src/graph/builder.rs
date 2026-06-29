@@ -100,10 +100,9 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
         .collect();
 
     for file in &scan_result.files {
-        let lang = crate::scan::parser::detect_language(&PathBuf::from(&file.path));
-        if lang.is_none() {
+        let Some(lang) = crate::scan::parser::detect_language(&PathBuf::from(&file.path)) else {
             continue;
-        }
+        };
 
         let file_sym_ids = graph
             .file_symbols
@@ -112,12 +111,7 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
             .unwrap_or_default();
 
         for import in &file.imports {
-            let resolved = resolve_import(
-                &import.module,
-                &file.path,
-                lang.unwrap(),
-                &known_file_strings,
-            );
+            let resolved = resolve_import(&import.module, &file.path, lang, &known_file_strings);
             let resolved = match resolved {
                 Some(r) => r,
                 None => continue,
@@ -216,9 +210,8 @@ fn resolve_rust_import(
     from_dir: &Path,
     known_files: &HashSet<String>,
 ) -> Option<PathBuf> {
-    if module.starts_with("crate::") {
+    if let Some(rel) = module.strip_prefix("crate::") {
         // crate::scan::parser → src/scan/parser.rs 或 src/scan/parser/mod.rs
-        let rel = module.strip_prefix("crate::").unwrap();
         let path_str = rel.replace("::", "/");
         let candidates = vec![
             format!("src/{}.rs", path_str),
@@ -229,9 +222,8 @@ fn resolve_rust_import(
         return find_existing(&candidates, known_files);
     }
 
-    if module.starts_with("super::") {
+    if let Some(rel) = module.strip_prefix("super::") {
         // super::foo → ../foo.rs 相对于当前文件
-        let rel = module.strip_prefix("super::").unwrap();
         let path_str = rel.replace("::", "/");
         let parent = from_dir.parent().unwrap_or(Path::new("."));
         let candidates = vec![

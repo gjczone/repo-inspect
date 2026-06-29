@@ -1,5 +1,6 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 /// Represents a matching file with relevance score and context
@@ -56,15 +57,16 @@ impl FileFinder {
         Ok(files)
     }
 
-    /// Search for a query across all files, returning matches sorted by relevance
-    pub fn search(&self, query: &str, _depth: u8) -> Vec<FileMatch> {
+    /// Search for a query across all files, returning matches sorted by relevance.
+    ///
+    /// Propagates walk errors instead of silently returning empty results.
+    pub fn search(&self, query: &str, _depth: u8) -> Result<Vec<FileMatch>> {
         let query_lower = query.to_lowercase();
         let terms: Vec<&str> = query_lower.split_whitespace().collect();
 
-        let files = match self.walk() {
-            Ok(f) => f,
-            Err(_) => return Vec::new(),
-        };
+        let files = self
+            .walk()
+            .with_context(|| format!("Failed to walk repository at {}", self.root.display()))?;
 
         let mut results = Vec::new();
 
@@ -97,8 +99,8 @@ impl FileFinder {
             }
         }
 
-        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-        results
+        results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
+        Ok(results)
     }
 }
 
@@ -154,7 +156,14 @@ fn is_source_file(path: &Path) -> bool {
                 | "sql"
                 | "graphql"
                 | "proto"
-                | "prisma",
+                | "prisma"
+                | "r"
+                | "jl"
+                | "ex"
+                | "exs"
+                | "erl"
+                | "hrl"
+                | "dart",
         )
     )
 }

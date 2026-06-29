@@ -46,7 +46,7 @@ pub fn run(args: FindHowArgs, repo: &Path, out_dir: &Path, format: OutputFormat)
 
     // L1 fallback: 纯文本搜索
     let finder = FileFinder::new(repo)?;
-    let matches = finder.search(&query, args.depth);
+    let matches = finder.search(&query, args.depth)?;
 
     writer.write_results(&matches)?;
 

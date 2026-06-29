@@ -331,9 +331,9 @@ fn sanitize_filename(s: &str) -> String {
             }
         })
         .collect();
-    // Truncate to reasonable length
-    if sanitized.len() > 60 {
-        sanitized[..60].to_string()
+    // Truncate to reasonable length (Unicode-safe char iteration)
+    if sanitized.chars().count() > 60 {
+        sanitized.chars().take(60).collect()
     } else {
         sanitized
     }
