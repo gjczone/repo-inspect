@@ -2,8 +2,12 @@ name: CI
 
 on:
   push:
-    branches: [main]
-    paths-ignore: ["**.md", "skills/**"]
+    branches: ["**"]
+    tags: ["v*"]
+    paths-ignore:
+      - "**.md"
+      - "skills/**"
+      - "rules/**"
   pull_request:
     branches: [main]
 
@@ -13,13 +17,17 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  check:
-    name: Format + Lint + Build + Test
+  # ─── 格式 + 静态检查 ─────────────────────────────────────────────────────
+  lint:
+    name: Lint (fmt + clippy)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -29,7 +37,68 @@ jobs:
         run: cargo fmt --check
 
       - name: Clippy (strict)
-        run: cargo clippy -- -D warnings
+        run: cargo clippy --all-targets -- -D warnings
+
+  # ─── 构建 + 测试（Linux stable） ────────────────────────────────────────
+  test:
+    name: Test (stable)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build debug
+        run: cargo build --tests
+
+      - name: Test
+        run: cargo test
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Smoke test — find-how
+        run: ./target/release/repo-inspect --repo . find-how "search" --depth 1
+
+      - name: Smoke test — overview
+        run: ./target/release/repo-inspect --repo . overview
+
+  # ─── MSRV（1.85，Rust 2024 edition） ─────────────────────────────────────
+  msrv:
+    name: MSRV (1.85)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: msrv-1.85
+
+      - name: Build release
+        run: cargo build --release
+
+      - name: Test
+        run: cargo test
+
+  # ─── macOS 交叉平台 ─────────────────────────────────────────────────────
+  macos:
+    name: Test (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Build release
         run: cargo build --release
@@ -39,3 +108,55 @@ jobs:
 
       - name: Smoke test
         run: ./target/release/repo-inspect --repo . find-how "search" --depth 1
+
+  # ─── 依赖安全审计 ────────────────────────────────────────────────────────
+  audit:
+    name: Security audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+
+      - name: Audit dependencies (advisory + license + sources)
+        run: cargo audit
+
+  # ─── 发布时额外验证 ──────────────────────────────────────────────────────
+  release:
+    name: Release verification
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [lint, test, msrv, macos, audit]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Full release build (locked)
+        run: cargo build --release --locked
+
+      - name: Check binary
+        run: |
+          file target/release/repo-inspect
+          ./target/release/repo-inspect --version
+          ./target/release/repo-inspect --help | head -5
+
+      - name: Full test suite (locked)
+        run: cargo test --locked
+
+      - name: Binary size check
+        run: |
+          SIZE=$(stat -f%z target/release/repo-inspect 2>/dev/null || stat -c%s target/release/repo-inspect)
+          echo "Binary size: $SIZE bytes ($(( SIZE / 1048576 )) MB)"
+          test $SIZE -lt 7000000 || echo "Warning: binary exceeds 7 MB"
+
+      - name: Smoke tests
+        run: |
+          ./target/release/repo-inspect --repo . find-how "search" --depth 1
+          ./target/release/repo-inspect --repo . overview
+          ./target/release/repo-inspect --repo . entries

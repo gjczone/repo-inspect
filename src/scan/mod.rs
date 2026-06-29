@@ -200,7 +200,7 @@ mod tests {
             result.symbol_count > 0,
             "should find symbols in this project"
         );
-        assert!(result.files.len() > 0, "should find source files");
+        assert!(!result.files.is_empty(), "should find source files");
 
         // 验证至少能找到 Args 符号
         let has_args = result
