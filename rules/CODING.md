@@ -72,7 +72,9 @@ Evidence: `Cargo.toml` (`anyhow` + `thiserror`), `src/main.rs` (`anyhow::Result`
 
 - Application-level: use `anyhow::Result<T>` with `?` propagation.
 - Library-level (shared error types): use `thiserror` derive macros.
-- Logging: use `log` crate macros (`info!`, `debug!`, `error!`, `warn!`). **NEVER** use `eprintln!` in production code.
+- Logging: use `log` crate macros (`info!`, `debug!`, `error!`, `warn!`).
+- User-facing progress output: use `eprintln!` (stderr) — this is a deliberate design choice to avoid mixing progress with stdout machine output.
+- **NEVER** use `println!` in production code (reserved for structured output to stdout).
 - Every `match Err` / `?` error path **MUST** log or propagate. Empty error branches (`_ => {}`) are forbidden.
 - **NEVER** leave `unwrap()` or `expect()` on operations that can fail under normal use (I/O, network, parsing).
 

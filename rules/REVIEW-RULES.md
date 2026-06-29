@@ -16,13 +16,13 @@ You are reviewing **repo-inspect**, a surgical codebase inspection CLI for AI ag
 
 ### DO report these (P0 — must fix)
 
-1. **Logic errors**: `unwrap()` on float comparison (`partial_cmp().unwrap()` in `src/search/mod.rs:100`) — panics if NaN enters score from edge-case scoring; `unwrap()` on `Option` after a guard that appears safe but is fragile to refactoring (`src/graph/builder.rs:118` — `lang.unwrap()` after `lang.is_none()` check 5 lines above; `src/graph/builder.rs:221,234` — `strip_prefix().unwrap()` after `starts_with()` check).
+1. **Logic errors**: `unwrap()` on `Option` after a guard that appears safe but is fragile to refactoring — e.g., `unwrap()` after an `is_none()` check, or `unwrap()` after `starts_with()`. These were fixed in v0.1.2 (`let Some` / `if let Some` patterns) but can reappear. Float NaN: `partial_cmp().unwrap()` — fixed in v0.1.2 (`unwrap_or(Ordering::Equal)`). Always prefer `if let` / `let Some` over guard-then-unwrap.
 
 2. **Type safety holes**: `SymbolKind::from_capture()` returns `None` for unrecognized capture names — caller must not silently drop the `None`. `detect_language()` returns `None` for unsupported file types — downstream code must handle this. Verify every call site handles `None` explicitly, not with `unwrap()`.
 
 3. **Concurrency bugs (rayon)**: `prepare_lightweight()` in `src/remote/mod.rs` deletes entire cache directory (`fs::remove_dir_all`) before writing new data — if the process is killed mid-write, ALL cached data is lost with no recovery path. Parallel writes in `prepare()`: each file is written to a unique path but `fresh_files` HashMap is built across threads via collect-then-merge — verify no race on the `fresh_files` insert loop (currently serial after collect, so safe).
 
-4. **Data corruption**: `prepare_lightweight()` clears-then-rewrites cache atomically at the directory level — no partial-write protection. `check_cache()` verifies freshness by TTL only, not file integrity (no checksums). Corrupted cached files will silently produce wrong analysis results until TTL expires.
+4. **Data corruption**: `prepare_lightweight()` clears-then-rewrites cache atomically at the directory level — still no partial-write protection at the directory level (individual file writes are now atomic via temp+rename, fixed in v0.1.2). `check_cache()` verifies freshness by TTL only, not file integrity (no checksums). Corrupted cached files will silently produce wrong analysis results until TTL expires.
 
 5. **Security — command injection**: `src/commands/overview.rs:647` runs `git log` via `std::process::Command` with a repo path from user input. While `Command` passes args as separate strings (no shell expansion), verify the repo path cannot contain `--` flags that could alter `git log` behavior.
 
@@ -30,9 +30,9 @@ You are reviewing **repo-inspect**, a surgical codebase inspection CLI for AI ag
 
 ### DO report these (P1 — reliability risk)
 
-1. **Silent error swallowing**: `src/search/mod.rs:65` — `FileFinder::search()` catches walk errors with `Err(_) => return Vec::new()` — silently returns empty results for permission errors, filesystem errors, or `.gitignore` parse failures. `src/remote/mod.rs` parallel download loops: individual file fetch failures are only `debug!()`-logged, never surfaced to the caller. If 100% of fetches fail, the function correctly bails, but partial failures (e.g., 80% of files failed) are silently accepted.
+1. **Silent error swallowing**: `FileFinder::search()` previously caught walk errors with `Err(_) => return Vec::new()` — FIXED in v0.1.2 (now returns `Result`). Remote download partial failures: previously only `debug!()`-logged — FIXED in v0.1.2 (now has error rate threshold >10% → hard error, otherwise `warn!` + `eprintln!` user warning). Still watch for any new silent-swallow patterns.
 
-2. **Missing error handling**: `src/remote/mod.rs:510` — `SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default()` — `unwrap_or_default()` silently returns 0 if the system clock is before the Unix epoch, which would mark cache as expired (age > TTL) and force unnecessary re-fetches.
+2. **Missing error handling**: clock `duration_since(UNIX_EPOCH)` — FIXED in v0.1.2 (now uses `checked_sub` + `warn!` for clock anomalies). Watch for any new unchecked clock arithmetic or `unwrap_or_default` on system time.
 
 3. **Inconsistent state from duplicated logic**: The two `is_source_file()` implementations in `src/search/mod.rs` and `src/remote/mod.rs` must stay in sync. Currently they are not structurally guaranteed to match — a reviewer must verify they contain the same extension list and skip-directory list. See P0 item 6.
 
@@ -40,7 +40,7 @@ You are reviewing **repo-inspect**, a surgical codebase inspection CLI for AI ag
 
 5. **Performance — hot path regression**: `src/search/mod.rs` reads every file into memory via `fs::read_to_string` and lowercases the entire content for scoring — O(total bytes) memory and CPU. `src/output/mod.rs` `write_markdown()` for symbols builds the entire markdown output as a `String` before a single `fs::write()` call — could OOM for very large symbol sets. `src/scan/mod.rs` collects all file contents into a single `Vec` before parallel parsing — memory peaks at O(total source bytes).
 
-6. **Error message quality**: `src/remote/mod.rs` rate-limit error message in `api_get_with_accept()` checks `body_str.contains("rate limit")` — this is fragile to GitHub changing the wording. Secondary rate limits use different phrasing. The 403 path also includes the full body, which could leak JSON payloads into user-facing error messages.
+6. **Error message quality**: rate-limit detection via string matching — FIXED in v0.1.2 (now uses serde_json parsing of `RateLimitResponse`, error bodies truncated to 200 chars). Still watch for fragile string matching in new error-handling paths.
 
 7. **CLI interface contract**: Any change to command names, flag names, output format, or filename sanitization logic breaks the API contract. `skills/repo-inspect/references/commands.md` MUST be updated in lockstep. `--output json` MUST produce valid JSON matching the documented struct shape.
 
@@ -64,7 +64,7 @@ You are reviewing **repo-inspect**, a surgical codebase inspection CLI for AI ag
 |------|---------------|
 | `src/main.rs` | 3-tier progressive scanning dispatch — verify every `Command` variant is matched and every branch handles `RepoSpec::Remote` correctly. `out_dir` resolution: relative paths are joined to repo dir, not cwd — verify this doesn't surprise callers. Missing `--full` flag fallthrough for commands not in Tier 1/2 dispatch. |
 | `src/remote/mod.rs` | Cache safety: `prepare_lightweight()` `remove_dir_all` + rewrite is atomic only if process survives. `check_cache()` trusts TTL without file integrity check. Parallel `par_iter()` download with `AtomicUsize` counters — verify collect-then-write serial phase after `par_iter()` doesn't have data race on `fresh_files`. `is_source_file()` must stay in sync with `src/search/mod.rs` copy. Error handling in `fetch_raw_file()`: raw URL fallback to Contents API may double-count API rate limits when raw URL returns non-404 errors. |
-| `src/search/mod.rs` | `FileFinder::search()`: `walk()` error silently returns empty vec. Score uses `partial_cmp().unwrap()` — panics on NaN. `is_source_file()` extension list must match `src/remote/mod.rs`. `extract_matching_lines()` hard-caps at 50 results — intentional but verify callers don't assume completeness. |
+| `src/search/mod.rs` | `FileFinder::search()`: now returns `Result` (fixed v0.1.2). Score uses `unwrap_or(Ordering::Equal)` (fixed v0.1.2). `is_source_file()` extension list must match `src/remote/mod.rs`. `extract_matching_lines()` hard-caps at 50 results — intentional but verify callers don't assume completeness. |
 | `src/output/mod.rs` | `sanitize_filename()`: empty string output for all-symbol queries — verify `OutputWriter::new()` handles empty sanitized name. `write_markdown()` and `write_symbol_markdown()` both query filename stem for the title — this is fragile (`.find-how-trace.md` would produce wrong title). `out_dir` resolution: relative `out_dir` is joined to repo dir in `main.rs`, not here — verify callers pass the correct resolved path. |
 | `src/scan/mod.rs` | `scan_project()`: all file contents collected into single `Vec` before parallel parse — memory O(total bytes). `find_symbols()` / `find_call_refs()` return references into `ScanResult` — caller must not drop `ScanResult` while references are live. `find_symbols()` sorts by exact match then prefix then contains, but uses only `cmp` on bool — equal-quality entries have nondeterministic ordering. |
 
@@ -97,7 +97,7 @@ Skip any finding that does not meet the P0/P1 bar. Do not submit more than 15 fi
 - [ ] `cargo clippy -- -D warnings` — exits 0, zero warnings
 - [ ] `cargo build --release` — exits 0, binary at `target/release/repo-inspect`
 - [ ] `cargo test` — all tests pass, zero failures
-- [ ] `grep -r "unwrap()" src/ --include="*.rs" | grep -v "cfg(test)" | grep -v "#\[test\]"` — review all `unwrap()` in production code paths (should only appear in `graph/builder.rs` guarded cases, `search/mod.rs:100`, and `remote/mod.rs:510`)
+- [ ] `grep -rn "\.unwrap()" src/ --include="*.rs" | grep -v "cfg(test)" | grep -v "#\[test\]" | grep -v "_unwrap\b"` — review all `unwrap()` in production code paths (should only appear in `graph/builder.rs:416` and `graph/mod.rs:219` after v0.1.2 fixes)
 - [ ] `grep -r "eprintln!" src/` — all `eprintln!` calls are user-facing progress output, not debug logging that should use `log` crate
 - [ ] Verify `is_source_file()` in `src/search/mod.rs` and `src/remote/mod.rs` have identical extension lists and skip-directory lists
 - [ ] `ls -lh target/release/repo-inspect` — binary < 6 MB

@@ -32,7 +32,7 @@
 |--------|------|----------------|
 | `cli` | CLI arg definitions + `RepoSpec` enum | Every subcommand starts here; args define the public API |
 | `main` | Env init + repo resolution + dispatch | The sole entry point; `remote::prepare` branching happens here |
-| `remote` | GitHub API: tree fetch + parallel raw download + cache | Isolated from all other modules; 1091 lines, most complex module |
+| `remote` | GitHub API: tree fetch + parallel raw download + cache | Isolated from all other modules; 1463 lines, most complex module |
 | `scan` | 3-phase tree-sitter pipeline: serial I/O → Query compile → rayon parallel parse | Core analysis engine; `CompiledQueries` pattern avoids per-file recompilation |
 | `search` | `.gitignore`-aware file walk + content grep via `ignore` crate | Used by `find-how` for L1 text fallback when L2 tree-sitter misses |
 | `output` | Markdown / JSON formatting + `.inspect/` file write | Single presentation layer; OutputFormat enum drives all formatting |
