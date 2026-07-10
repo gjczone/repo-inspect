@@ -71,6 +71,11 @@ fn write_trace_markdown(
     limit: usize,
     stack: &scan::stack::ProjectStack,
 ) -> Result<()> {
+    // 防御性守卫：避免跨函数依赖 run() 的 is_empty 检查（REVIEW-RULES P0 #1）
+    if symbols.is_empty() {
+        return Ok(());
+    }
+
     let path = writer.output_file();
     let mut f = std::fs::File::create(path)?;
 
