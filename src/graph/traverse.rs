@@ -72,34 +72,33 @@ fn bfs(
             continue;
         }
 
-        // 获取邻居: 根据方向选择 outgoing 或 incoming
-        let neighbors = match direction {
-            TraceDirection::Callee => graph
-                .outgoing
-                .get(&current_id)
-                .map(|edges| edges.iter().map(|e| &e.target).collect::<Vec<_>>())
-                .unwrap_or_default(),
-            TraceDirection::Caller => graph
-                .incoming
-                .get(&current_id)
-                .map(|edges| edges.iter().map(|e| &e.source).collect::<Vec<_>>())
-                .unwrap_or_default(),
+        // 获取邻居: 根据方向选择 outgoing 或 incoming，直接遍历边列表，
+        // 避免每次出队都 collect 一个新 Vec（REVIEW #66）
+        let edges = match direction {
+            TraceDirection::Callee => graph.outgoing.get(&current_id),
+            TraceDirection::Caller => graph.incoming.get(&current_id),
         };
 
-        for neighbor_id in neighbors {
-            if visited.contains(neighbor_id) {
-                continue;
-            }
-            visited.insert(neighbor_id.clone());
+        if let Some(edges) = edges {
+            for e in edges {
+                let neighbor_id = match direction {
+                    TraceDirection::Callee => &e.target,
+                    TraceDirection::Caller => &e.source,
+                };
+                if visited.contains(neighbor_id) {
+                    continue;
+                }
+                visited.insert(neighbor_id.clone());
 
-            results.push(TraceEntry {
-                symbol_id: neighbor_id.clone(),
-                depth: depth + 1,
-                direction,
-            });
+                results.push(TraceEntry {
+                    symbol_id: neighbor_id.clone(),
+                    depth: depth + 1,
+                    direction,
+                });
 
-            if depth + 1 < max_depth {
-                queue.push_back((neighbor_id.clone(), depth + 1));
+                if depth + 1 < max_depth {
+                    queue.push_back((neighbor_id.clone(), depth + 1));
+                }
             }
         }
     }

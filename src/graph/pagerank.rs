@@ -29,7 +29,7 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         .collect();
 
     // 初始均匀分布
-    let mut pr: Vec<f64> = vec![1.0 / n as f64; n];
+    let pr: Vec<f64> = vec![1.0 / n as f64; n];
 
     // 预计算每个节点的出边权重和
     let out_weight_sum: Vec<f64> = ids
@@ -61,17 +61,21 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
 
     let base = (1.0 - damping) / n as f64;
 
-    for iter in 0..max_iter {
-        // 计算悬挂节点分数总和
-        let dangling_sum: f64 = ids
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| out_weight_sum[*i] == 0.0)
-            .map(|(i, _)| pr[i])
-            .sum();
-        let dangling_contrib = damping * dangling_sum / n as f64;
+    // 预计算悬挂节点索引（出边权重和为 0），循环内仅对其求和，
+    // 将 O(N×iter) 的每轮全量 filter 降为 O(|dangling|×iter)（REVIEW #66）
+    let dangling_indices: Vec<usize> = (0..n).filter(|&i| out_weight_sum[i] == 0.0).collect();
 
-        let mut new_pr = vec![0.0f64; n];
+    // 双缓冲：循环间 swap 复用同一对 Vec，避免每轮重新分配 new_pr（REVIEW #66）
+    let mut pr_a = pr;
+    let mut pr_b = vec![0.0f64; n];
+
+    for iter in 0..max_iter {
+        let pr = &pr_a;
+        let new_pr = &mut pr_b;
+
+        // 计算悬挂节点分数总和（仅遍历预计算的悬挂节点）
+        let dangling_sum: f64 = dangling_indices.iter().map(|&i| pr[i]).sum();
+        let dangling_contrib = damping * dangling_sum / n as f64;
 
         for tgt_idx in 0..n {
             let mut score = base + dangling_contrib;
@@ -84,7 +88,7 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         // 归一化
         let total: f64 = new_pr.iter().sum();
         if total > 0.0 {
-            for v in &mut new_pr {
+            for v in new_pr.iter_mut() {
                 *v /= total;
             }
         }
@@ -96,7 +100,8 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f64, f64::max);
 
-        pr = new_pr;
+        // swap 双缓冲，下一轮以 new_pr 为输入
+        std::mem::swap(&mut pr_a, &mut pr_b);
 
         if delta < tol {
             debug!(
@@ -107,6 +112,8 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
             break;
         }
     }
+
+    let pr = pr_a;
 
     // 写回分数
     for (i, id) in ids.iter().enumerate() {
