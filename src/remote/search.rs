@@ -8,11 +8,8 @@ use anyhow::{Context, bail};
 use log::debug;
 use serde::Deserialize;
 
-const API_BASE: &str = "https://api.github.com";
-const USER_AGENT: &str = "repo-inspect/0.1.0";
-
-/// Maximum characters of error response body to include in user-facing messages.
-const MAX_ERROR_BODY_CHARS: usize = 200;
+// 复用 remote 模块共享的常量、类型与辅助函数，避免与 mod.rs 分叉（REVIEW #65）
+use super::{API_BASE, USER_AGENT, sanitize_url, truncate_body};
 
 // ─── API response types ──────────────────────────────────────────────────────
 
@@ -133,6 +130,7 @@ pub fn search_code(
 /// not fragile substring matching. Error messages are truncated.
 fn api_get_search(url: &str, token: Option<&str>) -> anyhow::Result<String> {
     let mut req = minreq::get(url)
+        .with_timeout(super::HTTP_TIMEOUT_SECS)
         .with_header("User-Agent", USER_AGENT)
         .with_header("Accept", "application/vnd.github.v3.text-match+json")
         .with_header("Accept-Encoding", "identity");
@@ -201,28 +199,6 @@ fn api_get_search(url: &str, token: Option<&str>) -> anyhow::Result<String> {
     }
 }
 
-/// Truncate a response body to a safe length for user-facing error messages.
-/// If the body is valid JSON, extract only the `message` field.
-fn truncate_body(body: &str) -> String {
-    use serde::Deserialize;
-    #[derive(Deserialize)]
-    struct ErrorBody {
-        message: Option<String>,
-    }
-
-    if let Ok(err) = serde_json::from_str::<ErrorBody>(body)
-        && let Some(msg) = err.message
-    {
-        return msg;
-    }
-
-    if body.len() <= MAX_ERROR_BODY_CHARS {
-        body.to_string()
-    } else {
-        format!("{}...", &body[..MAX_ERROR_BODY_CHARS])
-    }
-}
-
 /// Manually URL-encode a string for use in query parameters.
 fn url_encode(s: &str) -> String {
     let mut result = String::with_capacity(s.len() * 3);
@@ -247,14 +223,5 @@ fn hex_char(n: u8) -> char {
         0..=9 => (b'0' + n) as char,
         10..=15 => (b'A' + (n - 10)) as char,
         _ => '0',
-    }
-}
-
-/// Redact the URL for safe logging.
-fn sanitize_url(url: &str) -> String {
-    if url.len() <= 80 {
-        url.to_string()
-    } else {
-        format!("{}...", &url[..77])
     }
 }

@@ -50,6 +50,9 @@ const USER_AGENT: &str = "repo-inspect/0.1.0";
 /// Maximum characters of error response body to include in user-facing messages.
 const MAX_ERROR_BODY_CHARS: usize = 200;
 
+/// HTTP 请求超时（秒）。半开连接下避免 CLI 无限阻塞（REVIEW #62）。
+const HTTP_TIMEOUT_SECS: u64 = 30;
+
 /// Threshold: if download error rate exceeds this, bail instead of producing incomplete results.
 const DOWNLOAD_ERROR_RATE_THRESHOLD: f64 = 0.10;
 
@@ -251,7 +254,17 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
     let now = now_secs();
 
     // 4. 增量缓存：读取已有 meta，保留未过期的文件
-    let existing_meta = read_cache_meta(&cache_dir).ok();
+    // 缓存 meta 读取失败时记录日志并降级为全量下载（与兄弟函数保持一致，REVIEW #63）
+    let existing_meta = match read_cache_meta(&cache_dir) {
+        Ok(m) => Some(m),
+        Err(e) => {
+            debug!(
+                "Failed to read cache meta for {}/{} ({}), will re-download all files",
+                owner, repo, e
+            );
+            None
+        }
+    };
     let mut fresh_files: HashMap<String, u64> = HashMap::new();
 
     let need_download: Vec<&str> = source_files
@@ -465,8 +478,10 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
     let config_names = ["Cargo.toml", "package.json", "go.mod", "pyproject.toml"];
     for fname in &config_names {
         let path = cache_dir.join(fname);
-        if path.exists() {
-            let _ = fs::remove_file(&path);
+        if path.exists()
+            && let Err(e) = fs::remove_file(&path)
+        {
+            debug!("Failed to remove old config file {}: {}", path.display(), e);
         }
     }
 
@@ -717,65 +732,17 @@ fn check_cache(dir: &Path, required_mode: Option<CacheMode>) -> Option<PathBuf> 
         return None;
     }
 
+    // 轻量模式一致性校验：若 meta 标记 fresh 但关键数据文件缺失，说明刷新被中断，
+    // 判定未命中触发重新刷新，避免 overview 持续读取失败（REVIEW #60）。
+    if meta.mode == CacheMode::Lightweight && !dir.join("tree.json").exists() {
+        debug!(
+            "Lightweight cache for {} is inconsistent (meta present but tree.json missing), forcing refresh",
+            dir.display()
+        );
+        return None;
+    }
+
     Some(dir.to_path_buf())
-}
-
-/// Ensure a single file is cached locally, downloading it if missing or expired.
-///
-/// Returns the local path to the cached file. Thread-safe: uses file-level
-/// timestamp tracking to avoid redundant downloads.
-#[allow(dead_code)]
-pub fn ensure_cached(owner: &str, repo: &str, branch: &str, path: &str) -> anyhow::Result<PathBuf> {
-    let cache_dir = cache_dir_path(owner, repo);
-    let dest = cache_dir.join(path);
-    let now = now_secs();
-
-    // 检查是否已缓存且新鲜
-    if let Ok(meta) = read_cache_meta(&cache_dir)
-        && let Some(&ts) = meta.files.get(path)
-        && now.saturating_sub(ts) <= CACHE_TTL.as_secs()
-        && dest.exists()
-    {
-        debug!("File already cached and fresh: {}", path);
-        return Ok(dest);
-    }
-
-    // 下载文件
-    debug!("Downloading single file: {}", path);
-    let token = std::env::var("GITHUB_TOKEN").ok();
-    let content = fetch_raw_file(owner, repo, branch, path, token.as_deref())?;
-
-    // 写入磁盘（原子写入）
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    write_atomic(&dest, &content)
-        .with_context(|| format!("Failed to write cached file: {}", dest.display()))?;
-
-    // 更新元数据 — 如果 meta 损坏，不静默替换为空默认值；
-    // 而是尝试重建：保留已有文件记录，只添加新文件
-    let mut meta = match read_cache_meta(&cache_dir) {
-        Ok(m) => m,
-        Err(e) => {
-            debug!(
-                "Failed to read cache meta for {}/{} ({}), starting fresh for this file only",
-                owner, repo, e
-            );
-            CacheMeta {
-                fetched_at: now,
-                branch: branch.to_string(),
-                file_count: 0,
-                files: HashMap::new(),
-                mode: CacheMode::Full,
-            }
-        }
-    };
-    meta.files.insert(path.to_string(), now);
-    meta.file_count = meta.files.len();
-    meta.mode = CacheMode::Full;
-    write_cache_meta(&cache_dir, &meta)?;
-
-    Ok(dest)
 }
 
 // ─── tier-2 selective preparation ─────────────────────────────────────────────
@@ -1054,7 +1021,9 @@ fn http_get_raw(url: &str, token: Option<&str>) -> anyhow::Result<String> {
 
 /// Like http_get_raw but distinguishes 404 from other errors.
 fn http_get_raw_discriminated(url: &str, token: Option<&str>) -> Result<String, RawFetchError> {
-    let mut req = minreq::get(url).with_header("User-Agent", USER_AGENT);
+    let mut req = minreq::get(url)
+        .with_timeout(HTTP_TIMEOUT_SECS)
+        .with_header("User-Agent", USER_AGENT);
     if let Some(t) = token {
         req = req.with_header("Authorization", format!("Bearer {}", t));
     }
@@ -1092,6 +1061,7 @@ fn api_get(url: &str, token: Option<&str>) -> anyhow::Result<String> {
 /// leaking large response bodies.
 fn api_get_with_accept(url: &str, token: Option<&str>, accept: &str) -> anyhow::Result<String> {
     let mut req = minreq::get(url)
+        .with_timeout(HTTP_TIMEOUT_SECS)
         .with_header("User-Agent", USER_AGENT)
         .with_header("Accept", accept)
         .with_header("Accept-Encoding", "identity");
@@ -1163,7 +1133,10 @@ fn api_get_with_accept(url: &str, token: Option<&str>, accept: &str) -> anyhow::
 
 /// Truncate a response body to a safe length for user-facing error messages.
 /// If the body is valid JSON, extract only the `message` field.
-fn truncate_body(body: &str) -> String {
+///
+/// 字符安全截断：按 Unicode 字符边界切片，避免非 ASCII 输入下
+/// `byte index is not a char boundary` panic（REVIEW #56）。
+pub(crate) fn truncate_body(body: &str) -> String {
     // 尝试解析 JSON 并只提取 message 字段
     if let Ok(rate) = serde_json::from_str::<RateLimitResponse>(body)
         && let Some(msg) = rate.message
@@ -1171,21 +1144,26 @@ fn truncate_body(body: &str) -> String {
         return msg;
     }
 
-    if body.len() <= MAX_ERROR_BODY_CHARS {
+    if body.chars().count() <= MAX_ERROR_BODY_CHARS {
         body.to_string()
     } else {
-        format!("{}...", &body[..MAX_ERROR_BODY_CHARS])
+        format!(
+            "{}...",
+            body.chars().take(MAX_ERROR_BODY_CHARS).collect::<String>()
+        )
     }
 }
 
 /// Redact the URL of any token-bearing query parameters for safe logging.
-fn sanitize_url(url: &str) -> String {
+///
+/// 字符安全截断：按 Unicode 字符边界切片，避免非 ASCII 输入下 panic（REVIEW #56）。
+pub(crate) fn sanitize_url(url: &str) -> String {
     // GitHub API URLs don't use query params for auth, but safety first.
     // Truncate at 80 chars for readability.
-    if url.len() <= 80 {
+    if url.chars().count() <= 80 {
         url.to_string()
     } else {
-        format!("{}...", &url[..77])
+        format!("{}...", url.chars().take(77).collect::<String>())
     }
 }
 
@@ -1458,6 +1436,89 @@ mod tests {
         // 临时文件不应残留
         let tmp_path = dir.join("test.tmp");
         assert!(!tmp_path.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─── REVIEW #56: truncate_body/sanitize_url 非 ASCII 输入不 panic ─────────
+
+    #[test]
+    fn test_truncate_body_non_ascii_no_panic() {
+        // 含多字节字符且长度 > MAX_ERROR_BODY_CHARS(200) 的输入
+        let long = "错误响应体".repeat(100);
+        assert!(long.chars().count() > MAX_ERROR_BODY_CHARS);
+        let out = truncate_body(&long);
+        assert!(out.ends_with("..."), "截断结果应以 ... 结尾，实际: {}", out);
+        // 结果必须是合法 UTF-8（不 panic 即满足，这里再确认以 ... 结尾）
+        assert!(out.len() >= 3);
+    }
+
+    #[test]
+    fn test_sanitize_url_non_ascii_no_panic() {
+        // 含非 ASCII 的 owner/repo URL，长度 > 80
+        let url = "https://api.github.com/repos/café/démø".repeat(3);
+        assert!(url.chars().count() > 80);
+        let out = sanitize_url(&url);
+        assert!(out.ends_with("..."), "截断结果应以 ... 结尾，实际: {}", out);
+    }
+
+    #[test]
+    fn test_truncate_body_json_message_extracted() {
+        // 合法 JSON 错误体应只提取 message 字段
+        let body = r#"{"message":"API rate limit exceeded"}"#;
+        assert_eq!(truncate_body(body), "API rate limit exceeded");
+    }
+
+    // ─── REVIEW #60: 轻量缓存 meta 存在但 tree.json 缺失 → 判定未命中 ────────
+
+    #[test]
+    fn test_check_cache_lightweight_missing_tree_json() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("repo-inspect-test-cache-inconsistent");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // 写入 Lightweight 模式 meta（fresh），但不写 tree.json
+        let meta = CacheMeta {
+            fetched_at: now_secs(),
+            branch: "main".to_string(),
+            file_count: 10,
+            files: HashMap::new(),
+            mode: CacheMode::Lightweight,
+        };
+        write_cache_meta(&dir, &meta).unwrap();
+
+        // 关键文件缺失 → 应判定未命中，触发重新刷新
+        assert!(
+            check_cache(&dir, Some(CacheMode::Lightweight)).is_none(),
+            "Lightweight 缓存 tree.json 缺失时必须判定未命中"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_check_cache_lightweight_with_tree_json_hit() {
+        use std::fs;
+        let dir = std::env::temp_dir().join("repo-inspect-test-cache-consistent");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let meta = CacheMeta {
+            fetched_at: now_secs(),
+            branch: "main".to_string(),
+            file_count: 10,
+            files: HashMap::new(),
+            mode: CacheMode::Lightweight,
+        };
+        write_cache_meta(&dir, &meta).unwrap();
+        // tree.json 存在 → 命中
+        fs::write(dir.join("tree.json"), "[]").unwrap();
+
+        assert!(
+            check_cache(&dir, Some(CacheMode::Lightweight)).is_some(),
+            "Lightweight 缓存完整时应命中"
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 }
