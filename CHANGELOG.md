@@ -21,6 +21,19 @@ Initial release — surgical codebase inspection CLI for AI agents.
 - **Dual output**: Markdown (default) and JSON (`--output json`)
 - **Skill distribution**: bundled binary under `skills/repo-inspect/scripts/` for `npx skills add`
 
+## [0.1.5] - 2026-07-10
+
+### Fixed
+
+- **check_cache Full 模式一致性校验 (#77)**: Full 模式下检查缓存目录除 `meta.json` 外至少有一个实际数据文件，缺失则判定未命中触发刷新，避免刷新中断后持续读取空缓存（REVIEW-RULES P0#4 残留）
+- **PageRank max_iter=0 语义明确 (#78)**: `max_iter=0` 时跳过预计算与迭代，直接写回初始均匀分布（已归一），消除浪费并明确非迭代退化语义
+
+### Changed
+
+- **TLS 后端保持 https-native**: 评估 rustls 后端后发现 minreq 2.14.1 依赖的 rustls 0.21 链含 3 个不可修复的 `rustls-webpki` 漏洞（RUSTSEC-2026-0098/0099/0104，需 0.103.x 但 rustls 0.21 锁定 0.101.x）。保持 https-native（OpenSSL，无 RUSTSEC 漏洞）
+- **CI release job 上传二进制**: `ci.yml` 的 Release verification job 增加 `gh release upload` 步骤，tag push 时 CI 生成 native 二进制并上传到 GitHub Release。解决本地无 libssl-dev 无法编译 native 二进制的问题
+- **恢复 native 二进制**: skills 里的捆绑二进制恢复为 https-native 编译版本（v0.1.2 时代，5.8 MB）。v0.1.5 的 native 二进制将由 CI 在 tag push 时生成并上传
+
 ## [0.1.4] - 2026-07-10
 
 ### Fixed
