@@ -29,7 +29,7 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         .collect();
 
     // 初始均匀分布
-    let mut pr: Vec<f64> = vec![1.0 / n as f64; n];
+    let pr: Vec<f64> = vec![1.0 / n as f64; n];
 
     // 预计算每个节点的出边权重和
     let out_weight_sum: Vec<f64> = ids
@@ -131,7 +131,7 @@ pub fn calculate_pagerank_default(graph: &mut SymbolGraph) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{Edge, EdgeKind, Symbol, make_symbol_id};
+    use crate::graph::{make_symbol_id, Edge, EdgeKind, Symbol};
     use crate::scan::parser::SymbolKind;
     use std::path::PathBuf;
 
