@@ -266,29 +266,18 @@ fn project_name_from_path(repo: &Path) -> String {
 /// Count files per language from a full ScanResult.
 fn collect_language_stats(scan_result: &crate::scan::ScanResult) -> Vec<LanguageStat> {
     let mut counts: HashMap<String, usize> = HashMap::new();
-
     for file in &scan_result.files {
         if let Some(ext) = file.path.extension().and_then(|e| e.to_str()) {
             let lang = extension_to_language(ext);
             *counts.entry(lang).or_insert(0) += 1;
         }
     }
-
-    let mut stats: Vec<LanguageStat> = counts
-        .into_iter()
-        .map(|(language, file_count)| LanguageStat {
-            language,
-            file_count,
-        })
-        .collect();
-    stats.sort_by_key(|b| std::cmp::Reverse(b.file_count));
-    stats
+    language_stats_from_counts(counts)
 }
 
 /// Count files per language from cached tree items (path-based heuristic).
 fn collect_language_stats_from_tree(items: &[CachedTreeItem]) -> Vec<LanguageStat> {
     let mut counts: HashMap<String, usize> = HashMap::new();
-
     for item in items {
         if item.item_type != "blob" {
             continue;
@@ -299,7 +288,11 @@ fn collect_language_stats_from_tree(items: &[CachedTreeItem]) -> Vec<LanguageSta
             *counts.entry(lang).or_insert(0) += 1;
         }
     }
+    language_stats_from_counts(counts)
+}
 
+/// Build sorted Vec<LanguageStat> from a counts HashMap.
+fn language_stats_from_counts(counts: HashMap<String, usize>) -> Vec<LanguageStat> {
     let mut stats: Vec<LanguageStat> = counts
         .into_iter()
         .map(|(language, file_count)| LanguageStat {
@@ -865,25 +858,7 @@ fn compute_module_structure_from_scan(
         *entry.entry(key).or_insert(0) += 1;
     }
 
-    dir_map
-        .into_iter()
-        .map(|(top_dir, subs)| {
-            let children: Vec<DirInfo> = subs
-                .into_iter()
-                .map(|(sub_name, count)| DirInfo {
-                    path: sub_name,
-                    file_count: count,
-                    children: Vec::new(),
-                })
-                .collect();
-            let total_files: usize = children.iter().map(|c| c.file_count).sum();
-            DirInfo {
-                path: top_dir,
-                file_count: total_files,
-                children,
-            }
-        })
-        .collect()
+    build_dir_infos(dir_map)
 }
 
 /// Build a 2-level directory tree from cached tree items.
@@ -924,6 +899,11 @@ fn compute_module_structure_from_tree(
         *entry.entry(key).or_insert(0) += 1;
     }
 
+    build_dir_infos(dir_map)
+}
+
+/// Convert a BTreeMap of top_dir -> (sub_dir -> file_count) into sorted Vec<DirInfo>.
+fn build_dir_infos(dir_map: BTreeMap<String, BTreeMap<String, usize>>) -> Vec<DirInfo> {
     dir_map
         .into_iter()
         .map(|(top_dir, subs)| {

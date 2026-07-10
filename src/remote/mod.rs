@@ -25,6 +25,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -194,6 +195,47 @@ pub fn parse_owner_repo(spec: &str) -> anyhow::Result<(String, String)> {
     Ok((owner.to_string(), repo.to_string()))
 }
 
+/// 下载结果：(文件路径, 文件内容) 列表，错误数，总数。
+type DownloadResult<'a> = (Vec<(&'a str, String)>, usize, usize);
+
+/// 并行下载文件到缓存目录。返回 (结果列表, 错误数, 总数)。
+///
+/// 业务逻辑：对 paths 中的每个路径并行发起 raw 文件下载请求，
+/// 成功的收集到 results，失败的计入 errors 并打印警告日志。
+/// 调用方负责后续的磁盘写入和错误率阈值检查（prepare 需要 failed_paths
+/// 诊断信息，prepare_selective 不需要）。
+fn download_files_to_cache<'a>(
+    owner: &'a str,
+    repo: &'a str,
+    branch: &'a str,
+    paths: &'a [&'a str],
+    token: Option<&'a str>,
+) -> anyhow::Result<DownloadResult<'a>> {
+    let fetched = AtomicUsize::new(0);
+    let errors = AtomicUsize::new(0);
+    let total = paths.len();
+
+    let results: Vec<(&str, String)> = paths
+        .par_iter()
+        .filter_map(
+            |rel_path| match fetch_raw_file(owner, repo, branch, rel_path, token) {
+                Ok(content) => {
+                    fetched.fetch_add(1, Ordering::Relaxed);
+                    Some((*rel_path, content))
+                }
+                Err(e) => {
+                    errors.fetch_add(1, Ordering::Relaxed);
+                    warn!("Failed to fetch {}: {}", rel_path, e);
+                    None
+                }
+            },
+        )
+        .collect();
+
+    let error_count = errors.load(Ordering::Relaxed);
+    Ok((results, error_count, total))
+}
+
 /// Prepare a local file tree for the given remote repository.
 ///
 /// 1. Checks the cache — returns the cached directory if fresh and `refresh` is false.
@@ -307,44 +349,23 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         .with_context(|| format!("Failed to create cache directory: {}", cache_dir.display()))?;
 
     // 5. 并行下载需要更新的文件
-    let fetched = AtomicUsize::new(0);
-    let errors = AtomicUsize::new(0);
-    let failed_paths: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let (results, error_count, total_to_download) =
+        download_files_to_cache(owner, repo, &branch, &need_download, token.as_deref())?;
 
-    let total_to_download = need_download.len();
-
-    let results: Vec<(&str, String)> = need_download
-        .par_iter()
-        .filter_map(|rel_path| {
-            match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
-                Ok(content) => {
-                    fetched.fetch_add(1, Ordering::Relaxed);
-                    Some((*rel_path, content))
-                }
-                Err(e) => {
-                    errors.fetch_add(1, Ordering::Relaxed);
-                    if let Ok(mut paths) = failed_paths.lock()
-                        && paths.len() < 5
-                    {
-                        paths.push(rel_path.to_string());
-                    }
-                    warn!("Failed to fetch {}: {}", rel_path, e);
-                    None
-                }
-            }
-        })
+    // 计算失败路径样本（用于错误诊断）— helper 不跟踪失败路径，此处按结果差集推导
+    let result_paths: std::collections::HashSet<&str> = results.iter().map(|(p, _)| *p).collect();
+    let failed_paths: Vec<String> = need_download
+        .iter()
+        .filter(|p| !result_paths.contains(*p))
+        .take(5)
+        .map(|p| p.to_string())
         .collect();
-
-    let error_count = errors.load(Ordering::Relaxed);
 
     // 检查下载错误率 — 超过阈值则报错而不是产出不完整结果
     if total_to_download > 0 {
         let error_rate = error_count as f64 / total_to_download as f64;
         if error_rate > DOWNLOAD_ERROR_RATE_THRESHOLD {
-            let sample_paths = failed_paths
-                .lock()
-                .map(|p| p.join(", "))
-                .unwrap_or_default();
+            let sample_paths = failed_paths.join(", ");
             bail!(
                 "Failed to download {}/{} files ({:.0}%) for {}/{}. Sample failures: {}. \
                  Check network connectivity and GitHub token validity.",
@@ -365,18 +386,28 @@ pub fn prepare(owner: &str, repo: &str, refresh: bool) -> anyhow::Result<PathBuf
         );
     }
 
-    // 串行写入磁盘（原子写入）
-    for (rel_path, content) in &results {
-        let dest = safe_join(&cache_dir, rel_path)?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        write_atomic(&dest, content)?;
-        // 记录新下载文件的时间戳
-        fresh_files.insert(rel_path.to_string(), now);
-    }
+    // 并行写入磁盘（原子写入）
+    let fresh_files = Mutex::new(fresh_files);
 
-    let fetched = fetched.load(Ordering::Relaxed) + skipped;
+    results
+        .par_iter()
+        .try_for_each(|(rel_path, content)| -> anyhow::Result<()> {
+            let dest = safe_join(&cache_dir, rel_path)?;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_atomic(&dest, content)?;
+            // 记录新下载文件的时间戳
+            fresh_files
+                .lock()
+                .unwrap()
+                .insert(rel_path.to_string(), now);
+            Ok(())
+        })?;
+
+    let fresh_files = fresh_files.into_inner().unwrap();
+
+    let fetched = results.len() + skipped;
 
     if fetched == 0 {
         bail!(
@@ -455,9 +486,15 @@ pub fn prepare_lightweight(owner: &str, repo: &str, refresh: bool) -> anyhow::Re
     debug!("Fetched tree: {} entries", tree.len());
 
     // 3. 并行获取 README、配置文件、最近提交
-    let readme = fetch_readme(owner, repo, &branch);
-    let config_files = fetch_config_files(owner, repo, &branch);
-    let commits = fetch_recent_commits(owner, repo, token.as_deref());
+    let ((readme, config_files), commits) = rayon::join(
+        || {
+            rayon::join(
+                || fetch_readme(owner, repo, &branch),
+                || fetch_config_files(owner, repo, &branch),
+            )
+        },
+        || fetch_recent_commits(owner, repo, token.as_deref()),
+    );
 
     // 4. 清理仅 lightweight 相关的文件，保留源文件（不调用 remove_dir_all）
     let lightweight_files = ["tree.json", "README.md", "commits.json"];
@@ -561,16 +598,22 @@ pub fn fetch_readme(owner: &str, repo: &str, branch: &str) -> anyhow::Result<Opt
         "Readme.md",
     ];
 
-    for name in candidates {
-        let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, name);
-        match http_get_raw(&raw_url, None) {
-            Ok(body) => return Ok(Some(body)),
-            Err(_) => continue,
+    // 并行探测 README 候选文件，找到第一个成功响应即返回（rayon find_first 会取消其余线程）
+    let body = candidates
+        .par_iter()
+        .filter_map(|&name| {
+            let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, name);
+            http_get_raw(&raw_url, None).ok()
+        })
+        .find_first(|_| true);
+
+    match body {
+        Some(body) => Ok(Some(body)),
+        None => {
+            debug!("No README found for {}/{}", owner, repo);
+            Ok(None)
         }
     }
-
-    debug!("No README found for {}/{}", owner, repo);
-    Ok(None)
 }
 
 /// Fetch common config files from the repository root.
@@ -584,19 +627,17 @@ pub fn fetch_config_files(
 ) -> anyhow::Result<HashMap<String, String>> {
     let candidates = ["Cargo.toml", "package.json", "go.mod", "pyproject.toml"];
 
-    let mut configs = HashMap::new();
+    let configs = Mutex::new(HashMap::new());
 
-    for name in candidates {
+    candidates.par_iter().for_each(|&name| {
         let raw_url = format!("{}/{}/{}/{}/{}", RAW_BASE, owner, repo, branch, name);
-        match http_get_raw(&raw_url, None) {
-            Ok(body) => {
-                debug!("Fetched config file: {}", name);
-                configs.insert(name.to_string(), body);
-            }
-            Err(_) => continue,
+        if let Ok(body) = http_get_raw(&raw_url, None) {
+            debug!("Fetched config file: {}", name);
+            configs.lock().unwrap().insert(name.to_string(), body);
         }
-    }
+    });
 
+    let configs = configs.into_inner().unwrap();
     if configs.is_empty() {
         debug!("No config files found for {}/{}", owner, repo);
     }
@@ -851,30 +892,10 @@ pub fn prepare_selective(
         repo
     );
 
-    let fetched = AtomicUsize::new(0);
-    let errors = AtomicUsize::new(0);
     let now = now_secs();
 
-    let total = to_download.len();
-
-    let results: Vec<(&str, String)> = to_download
-        .par_iter()
-        .filter_map(|rel_path| {
-            match fetch_raw_file(owner, repo, &branch, rel_path, token.as_deref()) {
-                Ok(content) => {
-                    fetched.fetch_add(1, Ordering::Relaxed);
-                    Some((*rel_path, content))
-                }
-                Err(e) => {
-                    errors.fetch_add(1, Ordering::Relaxed);
-                    warn!("Failed to fetch {}: {}", rel_path, e);
-                    None
-                }
-            }
-        })
-        .collect();
-
-    let error_count = errors.load(Ordering::Relaxed);
+    let (results, error_count, total) =
+        download_files_to_cache(owner, repo, &branch, &to_download, token.as_deref())?;
 
     if total > 0 {
         let error_rate = error_count as f64 / total as f64;
@@ -898,16 +919,24 @@ pub fn prepare_selective(
         );
     }
 
-    for (rel_path, content) in &results {
-        let dest = safe_join(&cache_dir, rel_path)?;
-        if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        write_atomic(&dest, content)?;
-        meta.files.insert(rel_path.to_string(), now);
-    }
+    let files = std::mem::take(&mut meta.files);
+    let files = Mutex::new(files);
 
-    let count = fetched.load(Ordering::Relaxed);
+    results
+        .par_iter()
+        .try_for_each(|(rel_path, content)| -> anyhow::Result<()> {
+            let dest = safe_join(&cache_dir, rel_path)?;
+            if let Some(parent) = dest.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            write_atomic(&dest, content)?;
+            files.lock().unwrap().insert(rel_path.to_string(), now);
+            Ok(())
+        })?;
+
+    meta.files = files.into_inner().unwrap();
+
+    let count = results.len();
     meta.file_count = meta.files.len();
     meta.fetched_at = now;
     meta.mode = CacheMode::Full;

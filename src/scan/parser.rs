@@ -6,6 +6,7 @@
 //! - 输出结构化的 `ParsedFile` 供上层使用
 
 use std::path::Path;
+use tree_sitter::StreamingIterator;
 
 /// 支持的编程语言。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -187,6 +188,30 @@ pub fn parse_file(path: &Path, source: &[u8]) -> Option<ParsedFile> {
     parse_file_with_queries(path, source, lang, &queries)
 }
 
+/// 迭代查询的所有匹配，对每个 capture 调用 `f`。
+///
+/// 消除 symbols/imports/calls 三段重复的 while-let + for 循环样板代码。
+/// `cursor.matches` 返回 `StreamingIterator`，`m` 的引用仅在下次 `next()` 前有效；
+/// `cap.node` 是 `Copy` 的 `Node<'a>`（生命周期绑定到 `Tree`），可安全传入回调。
+#[inline]
+fn for_each_query_match<'a, F>(
+    query: &tree_sitter::Query,
+    cursor: &mut tree_sitter::QueryCursor,
+    root: tree_sitter::Node<'a>,
+    source: &[u8],
+    mut f: F,
+) where
+    F: FnMut(&str, tree_sitter::Node<'a>),
+{
+    let mut matches = cursor.matches(query, root, source);
+    while let Some(m) = matches.next() {
+        for cap in m.captures {
+            let cname = query.capture_names()[cap.index as usize];
+            f(cname, cap.node);
+        }
+    }
+}
+
 /// 用预编译的查询解析源文件。
 ///
 /// 与 `parse_file` 功能相同，但接受预编译的 `CompiledQueries`，避免重复编译。
@@ -197,7 +222,7 @@ pub fn parse_file_with_queries(
     lang: Language,
     queries: &CompiledQueries,
 ) -> Option<ParsedFile> {
-    use tree_sitter::{Parser, QueryCursor, StreamingIterator};
+    use tree_sitter::{Parser, QueryCursor};
 
     let ts_lang = ts_language(lang);
 
@@ -212,29 +237,25 @@ pub fn parse_file_with_queries(
     let mut calls = Vec::new();
 
     // 提取符号定义
-    {
-        let query = &queries.symbols;
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, root, source);
-        while let Some(m) = matches.next() {
-            let mut name_text = None;
-            let mut def_node = None;
-            let mut capture_name = None;
-            for ci in 0..m.captures.len() {
-                let cap = &m.captures[ci];
-                let cname = query.capture_names()[cap.index as usize];
-                if cname == "name" {
-                    name_text = std::str::from_utf8(&source[cap.node.byte_range()]).ok();
-                } else {
-                    capture_name = Some(cname);
-                    def_node = Some(cap.node);
-                }
+    // 每个 match 包含 @name 和 @definition.* 两个 capture，累积两者后产出符号
+    let mut cursor = QueryCursor::new();
+    let mut cur_name: Option<&str> = None;
+    let mut cur_def: Option<(SymbolKind, tree_sitter::Node)> = None;
+    for_each_query_match(
+        &queries.symbols,
+        &mut cursor,
+        root,
+        source,
+        |cname, node| {
+            if cname == "name" {
+                cur_name = std::str::from_utf8(&source[node.byte_range()]).ok();
+            } else if let Some(kind) = SymbolKind::from_capture(cname) {
+                cur_def = Some((kind, node));
             }
-            if let (Some(name), Some(node), Some(capture)) = (name_text, def_node, capture_name)
-                && let Some(kind) = SymbolKind::from_capture(capture)
-            {
+            // 两个 capture 都到齐后，生成符号
+            if let (Some(name), Some((kind, def_node))) = (cur_name, cur_def) {
                 // 提取签名：取定义节点的第一行，截断到 200 字符
-                let node_text = std::str::from_utf8(&source[node.byte_range()]).unwrap_or("");
+                let node_text = std::str::from_utf8(&source[def_node.byte_range()]).unwrap_or("");
                 let signature = node_text
                     .lines()
                     .next()
@@ -242,69 +263,55 @@ pub fn parse_file_with_queries(
                     .chars()
                     .take(200)
                     .collect::<String>();
-
                 symbols.push(ExtractedSymbol {
                     name: name.to_string(),
                     kind,
-                    line: node.start_position().row + 1,
-                    end_line: node.end_position().row + 1,
+                    line: def_node.start_position().row + 1,
+                    end_line: def_node.end_position().row + 1,
                     signature,
                 });
+                cur_name = None;
+                cur_def = None;
             }
-        }
-    }
+        },
+    );
 
     // 提取导入声明
-    {
-        let query = &queries.imports;
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, root, source);
-        while let Some(m) = matches.next() {
-            let mut module_text = None;
-            let mut line = 0;
-            for ci in 0..m.captures.len() {
-                let cap = &m.captures[ci];
-                let cname = query.capture_names()[cap.index as usize];
-                // @name, @source, @path 都是导入目标
-                if cname == "name" || cname == "source" || cname == "path" {
-                    module_text = std::str::from_utf8(&source[cap.node.byte_range()]).ok();
-                    line = cap.node.start_position().row + 1;
-                }
-            }
-            if let Some(module) = module_text {
+    let mut cursor = QueryCursor::new();
+    for_each_query_match(
+        &queries.imports,
+        &mut cursor,
+        root,
+        source,
+        |cname, node| {
+            // @name, @source, @path 都是导入目标
+            if (cname == "name" || cname == "source" || cname == "path")
+                && let Ok(module) = std::str::from_utf8(&source[node.byte_range()])
+            {
                 // 去掉字符串引号
                 let module = module.trim_matches('"').trim_matches('\'').to_string();
                 if !module.is_empty() {
-                    imports.push(ImportDecl { module, line });
+                    imports.push(ImportDecl {
+                        module,
+                        line: node.start_position().row + 1,
+                    });
                 }
             }
-        }
-    }
+        },
+    );
 
     // 提取函数调用
-    {
-        let query = &queries.calls;
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, root, source);
-        while let Some(m) = matches.next() {
-            let mut call_name = None;
-            let mut line = 0;
-            for ci in 0..m.captures.len() {
-                let cap = &m.captures[ci];
-                let cname = query.capture_names()[cap.index as usize];
-                if cname == "name" {
-                    call_name = std::str::from_utf8(&source[cap.node.byte_range()]).ok();
-                    line = cap.node.start_position().row + 1;
-                }
-            }
-            if let Some(name) = call_name {
-                calls.push(CallRef {
-                    name: name.to_string(),
-                    line,
-                });
-            }
+    let mut cursor = QueryCursor::new();
+    for_each_query_match(&queries.calls, &mut cursor, root, source, |cname, node| {
+        if cname == "name"
+            && let Ok(name) = std::str::from_utf8(&source[node.byte_range()])
+        {
+            calls.push(CallRef {
+                name: name.to_string(),
+                line: node.start_position().row + 1,
+            });
         }
-    }
+    });
 
     Some(ParsedFile {
         path: path.to_path_buf(),

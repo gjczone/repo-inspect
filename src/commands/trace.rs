@@ -4,6 +4,8 @@
 
 use crate::cli::{OutputFormat, TraceArgs, TraceDirection};
 use crate::graph;
+use crate::graph::SymbolGraph;
+use crate::graph::traverse::TraceEntry;
 use crate::output::OutputWriter;
 use crate::scan;
 use anyhow::Result;
@@ -62,6 +64,43 @@ pub fn run(args: TraceArgs, repo: &Path, out_dir: &Path, format: OutputFormat) -
     Ok(())
 }
 
+/// 按方向参数化输出 Markdown trace section，消除 callers/callees 两个块的逐行重复。
+fn write_trace_section_md(
+    f: &mut std::fs::File,
+    graph: &SymbolGraph,
+    symbol_id: &graph::SymbolId,
+    label: &str,
+    trace_fn: fn(&SymbolGraph, &graph::SymbolId, usize) -> Vec<TraceEntry>,
+    max_depth: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let entries = trace_fn(graph, symbol_id, max_depth);
+    let total = entries.len();
+    writeln!(f, "### {} ({})", label, total)?;
+    if total > limit {
+        writeln!(
+            f,
+            "_Showing top {} of {} — use `--limit` to see more_  ",
+            limit, total
+        )?;
+    }
+    writeln!(f)?;
+    for entry in entries.iter().take(limit) {
+        if let Some(s) = graph.symbols.get(&entry.symbol_id) {
+            writeln!(
+                f,
+                "- `{}` — {}:{} (depth {})",
+                s.name,
+                s.file.display(),
+                s.line,
+                entry.depth
+            )?;
+        }
+    }
+    writeln!(f)?;
+    Ok(())
+}
+
 fn write_trace_markdown(
     writer: &mut OutputWriter,
     graph: &graph::SymbolGraph,
@@ -97,60 +136,28 @@ fn write_trace_markdown(
         )?;
         writeln!(f)?;
 
-        // Callers
         if matches!(direction, TraceDirection::Callers | TraceDirection::Both) {
-            let callers = graph::traverse::trace_callers(graph, &sym.id, max_depth);
-            let total = callers.len();
-            writeln!(f, "### ← Callers ({})", total)?;
-            if total > limit {
-                writeln!(
-                    f,
-                    "_Showing top {} of {} — use `--limit` to see more_  ",
-                    limit, total
-                )?;
-            }
-            writeln!(f)?;
-            for entry in callers.iter().take(limit) {
-                if let Some(s) = graph.symbols.get(&entry.symbol_id) {
-                    writeln!(
-                        f,
-                        "- `{}` — {}:{} (depth {})",
-                        s.name,
-                        s.file.display(),
-                        s.line,
-                        entry.depth
-                    )?;
-                }
-            }
-            writeln!(f)?;
+            write_trace_section_md(
+                &mut f,
+                graph,
+                &sym.id,
+                "← Callers",
+                graph::traverse::trace_callers,
+                max_depth,
+                limit,
+            )?;
         }
 
-        // Callees
         if matches!(direction, TraceDirection::Callees | TraceDirection::Both) {
-            let callees = graph::traverse::trace_callees(graph, &sym.id, max_depth);
-            let total = callees.len();
-            writeln!(f, "### → Callees ({})", total)?;
-            if total > limit {
-                writeln!(
-                    f,
-                    "_Showing top {} of {} — use `--limit` to see more_  ",
-                    limit, total
-                )?;
-            }
-            writeln!(f)?;
-            for entry in callees.iter().take(limit) {
-                if let Some(s) = graph.symbols.get(&entry.symbol_id) {
-                    writeln!(
-                        f,
-                        "- `{}` — {}:{} (depth {})",
-                        s.name,
-                        s.file.display(),
-                        s.line,
-                        entry.depth
-                    )?;
-                }
-            }
-            writeln!(f)?;
+            write_trace_section_md(
+                &mut f,
+                graph,
+                &sym.id,
+                "→ Callees",
+                graph::traverse::trace_callees,
+                max_depth,
+                limit,
+            )?;
         }
     }
 

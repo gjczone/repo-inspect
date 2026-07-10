@@ -39,13 +39,9 @@ pub fn scan_project(root: &Path) -> Result<ScanResult> {
         .git_global(true)
         .build();
 
-    // 阶段 1: 收集所有需要解析的文件路径和内容（串行 I/O）
-    let mut file_entries: Vec<(
-        std::path::PathBuf,
-        std::path::PathBuf,
-        Vec<u8>,
-        parser::Language,
-    )> = Vec::new();
+    // 阶段 1: 收集所有需要解析的文件路径（串行 I/O，仅遍历目录 + 语言检测 + 大小过滤）
+    let mut file_paths: Vec<(std::path::PathBuf, std::path::PathBuf, parser::Language)> =
+        Vec::new();
     let mut skipped = 0usize;
 
     for entry in walker {
@@ -74,20 +70,29 @@ pub fn scan_project(root: &Path) -> Result<ScanResult> {
             continue;
         }
 
-        let source = match std::fs::read(abs_path) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("Cannot read {}: {}", abs_path.display(), e);
-                continue;
-            }
-        };
-
         let rel_path = abs_path
             .strip_prefix(root)
             .unwrap_or(abs_path)
             .to_path_buf();
-        file_entries.push((abs_path.to_path_buf(), rel_path, source, lang));
+        file_paths.push((abs_path.to_path_buf(), rel_path, lang));
     }
+
+    // 阶段 1.5: 并行读取文件内容（I/O 密集型，rayon 并行读取）
+    let file_entries: Vec<(
+        std::path::PathBuf,
+        std::path::PathBuf,
+        Vec<u8>,
+        parser::Language,
+    )> = file_paths
+        .par_iter()
+        .filter_map(|(abs_path, rel_path, lang)| match std::fs::read(abs_path) {
+            Ok(source) => Some((abs_path.clone(), rel_path.clone(), source, *lang)),
+            Err(e) => {
+                debug!("Cannot read {}: {}", abs_path.display(), e);
+                None
+            }
+        })
+        .collect();
 
     debug!(
         "Scan: {} files to parse, {} skipped (size/lang)",
