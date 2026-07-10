@@ -21,6 +21,17 @@ Initial release — surgical codebase inspection CLI for AI agents.
 - **Dual output**: Markdown (default) and JSON (`--output json`)
 - **Skill distribution**: bundled binary under `skills/repo-inspect/scripts/` for `npx skills add`
 
+## [0.1.5] - 2026-07-10
+
+### Fixed
+
+- **check_cache Full 模式一致性校验 (#77)**: Full 模式下检查缓存目录除 `meta.json` 外至少有一个实际数据文件，缺失则判定未命中触发刷新，避免刷新中断后持续读取空缓存（REVIEW-RULES P0#4 残留）
+- **PageRank max_iter=0 语义明确 (#78)**: `max_iter=0` 时跳过预计算与迭代，直接写回初始均匀分布（已归一），消除浪费并明确非迭代退化语义
+
+### Changed
+
+- **TLS 后端切换 https-native → https-rustls**: `minreq` feature 从 `https-native`（依赖系统 OpenSSL）切为 `https-rustls`（纯 Rust TLS，无系统依赖）。消除本地编译障碍，二进制更便携，CI 与本地一致。不引入新依赖（minreq feature 切换）
+
 ## [0.1.4] - 2026-07-10
 
 ### Fixed

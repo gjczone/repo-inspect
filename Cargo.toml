@@ -1,6 +1,6 @@
 [package]
 name = "repo-inspect"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 description = "Surgical codebase inspection CLI — find how features are implemented, trace symbols, detect patterns. Built for AI agents to quickly understand open-source projects."
 license = "MIT"
@@ -22,7 +22,7 @@ anyhow = "1"
 thiserror = "2"
 log = "0.4"
 env_logger = "0.11"
-minreq = { version = "2", features = ["https-native"] }
+minreq = { version = "2", features = ["https-rustls"] }
 
 # Tree-sitter (L2)
 tree-sitter = "0.26"

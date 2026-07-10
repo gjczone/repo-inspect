@@ -21,6 +21,17 @@ pub fn calculate_pagerank(graph: &mut SymbolGraph, damping: f64, max_iter: usize
         return;
     }
 
+    // max_iter=0：跳过迭代与预计算，直接写回初始均匀分布（已归一，和为 1.0）（REVIEW #78）
+    if max_iter == 0 {
+        let uniform = 1.0 / n as f64;
+        for id in &ids {
+            if let Some(sym) = graph.symbols.get_mut(id) {
+                sym.pagerank = uniform;
+            }
+        }
+        return;
+    }
+
     // symbol_id → 数组索引映射，O(1) 查找替代 ids.iter().position()
     let id_to_idx: HashMap<&str, usize> = ids
         .iter()

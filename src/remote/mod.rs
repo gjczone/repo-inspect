@@ -742,6 +742,23 @@ fn check_cache(dir: &Path, required_mode: Option<CacheMode>) -> Option<PathBuf> 
         return None;
     }
 
+    // Full 模式一致性校验：若 meta 标记 fresh 但缓存目录无实际数据文件（仅剩 meta.json），
+    // 说明刷新被中断（remove_dir_all 后写入源文件前进程被杀），判定未命中触发重新刷新（REVIEW #77）
+    if meta.mode == CacheMode::Full {
+        let has_cached_files = fs::read_dir(dir)
+            .map(|mut entries| {
+                entries.any(|e| e.map(|e| e.file_name() != "meta.json").unwrap_or(false))
+            })
+            .unwrap_or(false);
+        if !has_cached_files {
+            debug!(
+                "Full cache for {} is inconsistent (meta present but no cached files), forcing refresh",
+                dir.display()
+            );
+            return None;
+        }
+    }
+
     Some(dir.to_path_buf())
 }
 
