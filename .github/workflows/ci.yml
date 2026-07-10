@@ -4,10 +4,6 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
-    paths-ignore:
-      - "**.md"
-      - "skills/**"
-      - "rules/**"
   pull_request:
     branches: [main]
 
@@ -121,7 +117,7 @@ jobs:
           ./target/release/repo-inspect --repo . overview
           ./target/release/repo-inspect --repo . entries
 
-      - name: Upload binary to GitHub Release
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload ${{ github.ref_name }} target/release/repo-inspect --clobber
+        run: gh release create ${{ github.ref_name }} target/release/repo-inspect --title "${{ github.ref_name }}" --generate-notes --clobber
