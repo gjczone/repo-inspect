@@ -452,7 +452,9 @@ fn parse_cargo_dependencies(content: &str) -> Vec<DependencyInfo> {
 
 /// Parse a single Cargo dependency line like `clap = { version = "4", features = ["derive"] }`.
 fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
-    let (name, rest) = line.split_once('=').map(|(n, r)| (n.trim().to_string(), r.trim()))?;
+    let (name, rest) = line
+        .split_once('=')
+        .map(|(n, r)| (n.trim().to_string(), r.trim()))?;
 
     // 简单字符串版本: `name = "1.0"`
     if rest.starts_with('"') {
