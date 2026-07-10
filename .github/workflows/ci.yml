@@ -89,6 +89,8 @@ jobs:
     needs: [lint, test, audit]
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
 
@@ -118,3 +120,8 @@ jobs:
           ./target/release/repo-inspect --repo . find-how "search" --depth 1
           ./target/release/repo-inspect --repo . overview
           ./target/release/repo-inspect --repo . entries
+
+      - name: Upload binary to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} target/release/repo-inspect --clobber

@@ -30,7 +30,9 @@ Initial release — surgical codebase inspection CLI for AI agents.
 
 ### Changed
 
-- **TLS 后端切换 https-native → https-rustls**: `minreq` feature 从 `https-native`（依赖系统 OpenSSL）切为 `https-rustls`（纯 Rust TLS，无系统依赖）。消除本地编译障碍，二进制更便携，CI 与本地一致。不引入新依赖（minreq feature 切换）
+- **TLS 后端保持 https-native**: 评估 rustls 后端后发现 minreq 2.14.1 依赖的 rustls 0.21 链含 3 个不可修复的 `rustls-webpki` 漏洞（RUSTSEC-2026-0098/0099/0104，需 0.103.x 但 rustls 0.21 锁定 0.101.x）。保持 https-native（OpenSSL，无 RUSTSEC 漏洞）
+- **CI release job 上传二进制**: `ci.yml` 的 Release verification job 增加 `gh release upload` 步骤，tag push 时 CI 生成 native 二进制并上传到 GitHub Release。解决本地无 libssl-dev 无法编译 native 二进制的问题
+- **恢复 native 二进制**: skills 里的捆绑二进制恢复为 https-native 编译版本（v0.1.2 时代，5.8 MB）。v0.1.5 的 native 二进制将由 CI 在 tag push 时生成并上传
 
 ## [0.1.4] - 2026-07-10
 
