@@ -14,7 +14,7 @@ use rayon::prelude::*;
 use std::collections::HashMap;
 use std::path::Path;
 
-use parser::{CompiledQueries, ParsedFile, compile_queries, detect_language};
+use parser::{CompiledQueries, ExtractedSymbol, ParsedFile, compile_queries, detect_language};
 
 /// 项目扫描结果。
 #[derive(Debug)]
@@ -157,14 +157,35 @@ pub fn find_symbols<'a>(
         }
     }
 
-    // 按匹配质量排序: 完全匹配 > 前缀匹配 > 包含匹配
-    matches.sort_by(|a, b| {
-        let a_exact = terms.iter().any(|t| a.1.name.to_lowercase() == *t);
-        let b_exact = terms.iter().any(|t| b.1.name.to_lowercase() == *t);
-        b_exact.cmp(&a_exact)
+    // 按匹配质量排序: 完全匹配(exact=2) > 前缀匹配(prefix=1) > 包含匹配(contains=0)
+    // 预计算匹配质量与稳定 tiebreaker，避免排序闭包内重复分配（REVIEW #59 + #67）
+    let mut scored: Vec<(u8, &Path, &ExtractedSymbol)> = matches
+        .into_iter()
+        .map(|(path, sym)| {
+            let name_lower = sym.name.to_lowercase();
+            let quality = if terms.iter().any(|t| name_lower == *t) {
+                2
+            } else if terms.iter().any(|t| name_lower.starts_with(t)) {
+                1
+            } else {
+                0
+            };
+            (quality, path, sym)
+        })
+        .collect();
+
+    scored.sort_by(|a, b| {
+        // 质量降序；同质量按 (file, line, name) 升序稳定排序
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.cmp(b.1))
+            .then_with(|| a.2.line.cmp(&b.2.line))
+            .then_with(|| a.2.name.cmp(&b.2.name))
     });
 
-    matches
+    scored
+        .into_iter()
+        .map(|(_, path, sym)| (path, sym))
+        .collect()
 }
 
 /// 在扫描结果中按名称搜索调用引用（不区分大小写）。
@@ -185,6 +206,14 @@ pub fn find_call_refs<'a>(
             }
         }
     }
+
+    // 按 (file, line) 稳定排序，保证 CLI 输出顺序可复现（REVIEW #58）
+    matches.sort_by(|a, b| {
+        a.0.display()
+            .to_string()
+            .cmp(&b.0.display().to_string())
+            .then(a.1.line.cmp(&b.1.line))
+    });
 
     matches
 }
@@ -229,5 +258,112 @@ mod tests {
         let refs = find_call_refs(&result, "parse");
         // 项目中一定有 parse 相关的调用
         assert!(!refs.is_empty(), "should find parse-related calls");
+    }
+
+    // ─── REVIEW #58: find_call_refs 输出顺序可复现 ───────────────────────────
+
+    #[test]
+    fn test_find_call_refs_order_deterministic() {
+        use parser::CallRef;
+        use std::path::PathBuf;
+
+        // 构造确定性 ScanResult，模拟并行收集的非确定顺序
+        let mut file_a = ParsedFile {
+            path: PathBuf::from("a.rs"),
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            calls: vec![
+                CallRef {
+                    name: "parse".into(),
+                    line: 20,
+                },
+                CallRef {
+                    name: "parse".into(),
+                    line: 5,
+                },
+            ],
+        };
+        let file_b = ParsedFile {
+            path: PathBuf::from("b.rs"),
+            symbols: Vec::new(),
+            imports: Vec::new(),
+            calls: vec![CallRef {
+                name: "parse".into(),
+                line: 10,
+            }],
+        };
+        // 故意打乱插入顺序（交换两元素 line 值验证排序稳定）
+        let tmp = file_a.calls[0].line;
+        file_a.calls[0].line = file_a.calls[1].line;
+        file_a.calls[1].line = tmp;
+        let result = ScanResult {
+            files: vec![file_b, file_a], // b 在 a 前，验证按 (file,line) 排序
+            symbol_count: 0,
+        };
+
+        let refs = find_call_refs(&result, "parse");
+        assert_eq!(refs.len(), 3);
+        // 期望顺序: a.rs:5, a.rs:20, b.rs:10
+        assert_eq!(refs[0].0.to_string_lossy(), "a.rs");
+        assert_eq!(refs[0].1.line, 5);
+        assert_eq!(refs[1].0.to_string_lossy(), "a.rs");
+        assert_eq!(refs[1].1.line, 20);
+        assert_eq!(refs[2].0.to_string_lossy(), "b.rs");
+        assert_eq!(refs[2].1.line, 10);
+    }
+
+    // ─── REVIEW #59: find_symbols 三级匹配质量排序 ──────────────────────────
+
+    #[test]
+    fn test_find_symbols_match_quality_ordering() {
+        use parser::{ExtractedSymbol, SymbolKind};
+        use std::path::PathBuf;
+
+        let sym_exact = ExtractedSymbol {
+            name: "middleware".into(),
+            kind: SymbolKind::Function,
+            line: 1,
+            end_line: 1,
+            signature: String::new(),
+        };
+        let sym_prefix = ExtractedSymbol {
+            name: "middleware_auth".into(),
+            kind: SymbolKind::Function,
+            line: 2,
+            end_line: 2,
+            signature: String::new(),
+        };
+        let sym_contains = ExtractedSymbol {
+            name: "http_middleware_cfg".into(),
+            kind: SymbolKind::Function,
+            line: 3,
+            end_line: 3,
+            signature: String::new(),
+        };
+
+        let file = ParsedFile {
+            path: PathBuf::from("m.rs"),
+            symbols: vec![sym_contains.clone(), sym_prefix.clone(), sym_exact.clone()],
+            imports: Vec::new(),
+            calls: Vec::new(),
+        };
+        // 打乱顺序验证稳定排序
+        let result = ScanResult {
+            files: vec![file],
+            symbol_count: 3,
+        };
+
+        let matches = find_symbols(&result, "middleware");
+        assert_eq!(matches.len(), 3);
+        // 期望: exact(middleware) > prefix(middleware_*) > contains(*_middleware_*)
+        assert_eq!(matches[0].1.name, "middleware");
+        assert_eq!(matches[1].1.name, "middleware_auth");
+        assert_eq!(matches[2].1.name, "http_middleware_cfg");
+
+        // 两次运行顺序一致（可复现）
+        let again = find_symbols(&result, "middleware");
+        let names: Vec<&str> = matches.iter().map(|(_, s)| s.name.as_str()).collect();
+        let again_names: Vec<&str> = again.iter().map(|(_, s)| s.name.as_str()).collect();
+        assert_eq!(names, again_names);
     }
 }
