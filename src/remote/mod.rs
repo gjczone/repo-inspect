@@ -1260,68 +1260,8 @@ fn write_atomic(path: &Path, content: &str) -> anyhow::Result<()> {
 /// Mirrors the logic in `src/search/mod.rs` but operates on path strings rather
 /// than the filesystem.
 fn is_source_file(path: &str) -> bool {
-    // 跳过常见非源代码目录
-    let lower = path.to_lowercase();
-    if lower.contains("node_modules/")
-        || lower.contains(".git/")
-        || lower.contains("target/")
-        || lower.contains("dist/")
-        || lower.contains("build/")
-        || lower.contains("__pycache__/")
-        || lower.contains(".venv/")
-        || lower.contains("vendor/")
-    {
-        return false;
-    }
-
-    // 按扩展名判断
-    let p = Path::new(path);
-    matches!(
-        p.extension().and_then(|e| e.to_str()),
-        Some(
-            "rs" | "py"
-                | "js"
-                | "ts"
-                | "tsx"
-                | "jsx"
-                | "go"
-                | "java"
-                | "c"
-                | "cpp"
-                | "h"
-                | "hpp"
-                | "rb"
-                | "php"
-                | "swift"
-                | "kt"
-                | "scala"
-                | "cs"
-                | "fs"
-                | "vue"
-                | "svelte"
-                | "json"
-                | "yaml"
-                | "yml"
-                | "toml"
-                | "md"
-                | "css"
-                | "scss"
-                | "less"
-                | "html"
-                | "xml"
-                | "sql"
-                | "graphql"
-                | "proto"
-                | "prisma"
-                | "r"
-                | "jl"
-                | "ex"
-                | "exs"
-                | "erl"
-                | "hrl"
-                | "dart"
-        )
-    )
+    // 委托到共享实现，保证本地/远程过滤行为一致（REVIEW #67）
+    crate::search::is_source_file_name(path)
 }
 
 /// Find the user's home directory, falling back to `/tmp` if unavailable.
