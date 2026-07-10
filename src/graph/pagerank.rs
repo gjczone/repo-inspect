@@ -131,7 +131,7 @@ pub fn calculate_pagerank_default(graph: &mut SymbolGraph) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::graph::{make_symbol_id, Edge, EdgeKind, Symbol};
+    use crate::graph::{Edge, EdgeKind, Symbol, make_symbol_id};
     use crate::scan::parser::SymbolKind;
     use std::path::PathBuf;
 
