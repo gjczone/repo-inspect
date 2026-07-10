@@ -60,6 +60,8 @@ pub struct OutputWriter {
     out_dir: PathBuf,
     output_file: PathBuf,
     format: OutputFormat,
+    /// 原始查询字符串，输出时直接使用，避免从文件名反推（REVIEW #68 Step 3）
+    query: String,
 }
 
 impl OutputWriter {
@@ -87,6 +89,7 @@ impl OutputWriter {
             out_dir: out_dir.to_path_buf(),
             output_file,
             format,
+            query: query.to_string(),
         })
     }
 
@@ -116,11 +119,7 @@ impl OutputWriter {
     }
 
     fn write_json(&mut self, matches: &[FileMatch]) -> Result<()> {
-        let query = self
-            .output_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+        let query = &self.query;
 
         let output = FindHowOutput {
             query: query.to_string(),
@@ -150,11 +149,7 @@ impl OutputWriter {
 
     fn write_markdown(&self, matches: &[FileMatch]) -> Result<()> {
         let mut f = fs::File::create(&self.output_file)?;
-        let query = self
-            .output_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("inspection");
+        let query = &self.query;
 
         writeln!(f, "# Inspection: {}", query)?;
         writeln!(f)?;
@@ -218,11 +213,7 @@ impl OutputWriter {
         definitions: &[(&Path, &ExtractedSymbol)],
         call_refs: &[(&Path, &parser::CallRef)],
     ) -> Result<()> {
-        let query = self
-            .output_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
+        let query = &self.query;
 
         let output = SymbolFindHowOutput {
             query: query.to_string(),
@@ -258,11 +249,7 @@ impl OutputWriter {
         call_refs: &[(&Path, &parser::CallRef)],
     ) -> Result<()> {
         let mut f = fs::File::create(&self.output_file)?;
-        let query = self
-            .output_file
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("inspection");
+        let query = &self.query;
 
         writeln!(f, "# Inspection: {}", query)?;
         writeln!(f)?;
@@ -336,5 +323,36 @@ fn sanitize_filename(s: &str) -> String {
         sanitized.chars().take(60).collect()
     } else {
         sanitized
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::OutputFormat;
+
+    #[test]
+    fn test_write_symbol_json_query_is_raw_not_stem() {
+        // REVIEW #68 Step 3: JSON 的 query 字段应使用原始 query，
+        // 而非从文件名 stem 反推（含命令前缀 find-how-）
+        let dir = std::env::temp_dir().join("repo-inspect-test-output-query");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut writer =
+            OutputWriter::new(&dir, "find-how", "middleware", OutputFormat::Json).unwrap();
+        let empty: Vec<(&Path, &ExtractedSymbol)> = Vec::new();
+        let calls: Vec<(&Path, &parser::CallRef)> = Vec::new();
+        writer.write_symbol_results(&empty, &calls).unwrap();
+
+        let json_path = dir.join("find-how-middleware.json");
+        let content = std::fs::read_to_string(&json_path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(
+            v["query"], "middleware",
+            "query 字段应为原始 query，不应含命令前缀 find-how-"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

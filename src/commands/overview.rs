@@ -472,8 +472,8 @@ fn parse_cargo_dep_line(line: &str) -> Option<(String, String)> {
                 return Some((name, version));
             }
         }
-        // 没有 version 字段（如 git 依赖），返回占位
-        return Some((name, "git".to_string()));
+        // 没有 version 字段（如 git 依赖），返回空串而非伪造版本号（REVIEW #68 Step 4）
+        return Some((name, String::new()));
     }
 
     None
@@ -698,12 +698,10 @@ fn collect_recent_changes_from_cache(repo: &Path) -> Result<Vec<ChangeEntry>> {
 /// Aggregate per-symbol PageRank into per-file scores.
 fn compute_file_pageranks(graph: &crate::graph::SymbolGraph) -> Vec<(PathBuf, f64)> {
     let mut file_scores: HashMap<PathBuf, f64> = HashMap::new();
-    let mut file_symbol_counts: HashMap<PathBuf, usize> = HashMap::new();
 
     for symbol in graph.symbols.values() {
         let key = symbol.file.clone();
         *file_scores.entry(key.clone()).or_insert(0.0) += symbol.pagerank;
-        *file_symbol_counts.entry(key).or_insert(0) += 1;
     }
 
     let mut result: Vec<(PathBuf, f64)> = file_scores.into_iter().collect();
@@ -1097,7 +1095,13 @@ fn write_markdown(writer: &OutputWriter, data: &OverviewOutput) -> Result<()> {
         out.push_str("| Package | Version |\n");
         out.push_str("|---------|----------|\n");
         for dep in &data.dependencies {
-            out.push_str(&format!("| {} | {} |\n", dep.name, dep.version));
+            // 无版本（如 git 依赖）显示占位而非空单元格（REVIEW #68 Step 4）
+            let version = if dep.version.is_empty() {
+                "-".to_string()
+            } else {
+                dep.version.clone()
+            };
+            out.push_str(&format!("| {} | {} |\n", dep.name, version));
         }
         out.push('\n');
     }
