@@ -21,6 +21,17 @@ Initial release — surgical codebase inspection CLI for AI agents.
 - **Dual output**: Markdown (default) and JSON (`--output json`)
 - **Skill distribution**: bundled binary under `skills/repo-inspect/scripts/` for `npx skills add`
 
+## [0.1.4] - 2026-07-10
+
+### Fixed
+
+- **trace 命令空切片守卫 (#57)**: `write_trace_markdown` 内部增加 `if symbols.is_empty() { return Ok(()); }` 防御性守卫，消除跨函数 `symbols[0]` 索引的 panic 风险（REVIEW-RULES P0 #1 guard-then-index 模式）。非破坏性变更。
+
+### Review 遗留 (已开 issue，非阻塞)
+
+- #77 `check_cache` 对 Full 模式也需校验关键缓存文件存在性
+- #78 PageRank 在 `max_iter=0` 时显式归一或早返回（防御性边界）
+
 ## [0.1.3] - 2026-07-10
 
 ### Fixed
