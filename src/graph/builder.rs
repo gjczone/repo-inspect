@@ -4,7 +4,7 @@
 //! Phase 2: 建边（call/ref/import）
 //! Phase 3: 由外部调用 PageRank（不在此模块）
 
-use super::{Edge, EdgeKind, Symbol, SymbolGraph, make_symbol_id};
+use super::{Edge, EdgeKind, Symbol, SymbolGraph, SymbolId, make_symbol_id};
 use crate::scan::ScanResult;
 use crate::scan::parser::Language;
 use log::debug;
@@ -43,33 +43,36 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
 
     // Phase 2: 建边
     // 遍历每个文件的 call refs，匹配 callee 符号
+    // 两阶段模式: 先用不可变借用收集所有边，再用可变借用批量添加
+    let mut call_edges: Vec<(SymbolId, SymbolId, EdgeKind, f64)> = Vec::new();
+
     for file in &scan_result.files {
         let file_sym_ids = graph
             .file_symbols
             .get(&file.path)
-            .cloned()
-            .unwrap_or_default();
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
 
         for call in &file.calls {
             // 查找 callee: 全局 name_index 匹配
-            let callee_ids: Vec<_> = graph
+            let callee_ids = graph
                 .name_index
                 .get(&call.name)
-                .cloned()
-                .unwrap_or_default();
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
 
             if callee_ids.is_empty() {
                 continue;
             }
 
             // 查找 caller: 包含此 call 行号的最内层符号
-            let caller_id = find_caller_symbol(&file_sym_ids, &graph, call.line);
+            let caller_id = find_caller_symbol(file_sym_ids, &graph, call.line);
             let caller_id = match caller_id {
                 Some(id) => id,
                 None => continue,
             };
 
-            for callee_id in &callee_ids {
+            for callee_id in callee_ids {
                 if *callee_id == caller_id {
                     continue; // 不自环
                 }
@@ -81,23 +84,31 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
                     (EdgeKind::Call, 1.0)
                 };
 
-                graph.add_edge(Edge {
-                    source: caller_id.clone(),
-                    target: callee_id.clone(),
-                    kind,
-                    weight,
-                });
+                call_edges.push((caller_id.clone(), callee_id.clone(), kind, weight));
             }
         }
     }
 
+    // 批量添加 call/ref 边
+    for (source, target, kind, weight) in call_edges {
+        graph.add_edge(Edge {
+            source,
+            target,
+            kind,
+            weight,
+        });
+    }
+
     // Phase 2b: import 边
-    // 收集所有已知文件路径，用于 import 解析
-    let known_files: HashSet<&Path> = graph.file_symbols.keys().map(|p| p.as_path()).collect();
-    let known_file_strings: HashSet<String> = known_files
-        .iter()
+    // 收集所有已知文件路径（owned String），用于 import 解析
+    let known_file_strings: HashSet<String> = graph
+        .file_symbols
+        .keys()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
+
+    // 两阶段模式: 先收集 import 边，再批量添加
+    let mut import_edges: Vec<(SymbolId, SymbolId, EdgeKind, f64)> = Vec::new();
 
     for file in &scan_result.files {
         let Some(lang) = crate::scan::parser::detect_language(&PathBuf::from(&file.path)) else {
@@ -107,8 +118,8 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
         let file_sym_ids = graph
             .file_symbols
             .get(&file.path)
-            .cloned()
-            .unwrap_or_default();
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
 
         for import in &file.imports {
             let resolved = resolve_import(&import.module, &file.path, lang, &known_file_strings);
@@ -121,27 +132,32 @@ pub fn build_graph(scan_result: &ScanResult) -> SymbolGraph {
             let target_sym_ids = graph
                 .file_symbols
                 .get(&resolved)
-                .cloned()
-                .unwrap_or_default();
+                .map(|v| v.as_slice())
+                .unwrap_or(&[]);
 
             if target_sym_ids.is_empty() {
                 continue;
             }
 
             // 当前文件所有符号 → 目标文件所有符号 (weight=0.3)
-            for src_id in &file_sym_ids {
-                for tgt_id in &target_sym_ids {
+            for src_id in file_sym_ids {
+                for tgt_id in target_sym_ids {
                     if src_id != tgt_id {
-                        graph.add_edge(Edge {
-                            source: src_id.clone(),
-                            target: tgt_id.clone(),
-                            kind: EdgeKind::Import,
-                            weight: 0.3,
-                        });
+                        import_edges.push((src_id.clone(), tgt_id.clone(), EdgeKind::Import, 0.3));
                     }
                 }
             }
         }
+    }
+
+    // 批量添加 import 边
+    for (source, target, kind, weight) in import_edges {
+        graph.add_edge(Edge {
+            source,
+            target,
+            kind,
+            weight,
+        });
     }
 
     debug!("Graph Phase 2: {} edges", graph.edge_count());

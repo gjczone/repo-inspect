@@ -8,7 +8,7 @@ pub mod pagerank;
 pub mod traverse;
 
 use crate::scan::parser::SymbolKind;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// 符号唯一标识 — `{file}::{name}::{line}`。
@@ -76,6 +76,9 @@ pub struct SymbolGraph {
     pub name_index: HashMap<String, Vec<SymbolId>>,
     /// 文件到符号的映射: file → symbol_ids
     pub file_symbols: HashMap<PathBuf, Vec<SymbolId>>,
+    /// 边去重索引: (source, target, kind) → 已存在
+    /// O(1) 去重检查，替代 outgoing 列表的线性扫描
+    pub edge_dedup: HashSet<(SymbolId, SymbolId, EdgeKind)>,
 }
 
 /// 生成符号唯一 ID。
@@ -94,6 +97,7 @@ impl SymbolGraph {
             incoming: HashMap::new(),
             name_index: HashMap::new(),
             file_symbols: HashMap::new(),
+            edge_dedup: HashSet::new(),
         }
     }
 
@@ -115,12 +119,9 @@ impl SymbolGraph {
     /// 添加有向边。自动维护 outgoing 和 incoming 索引。
     /// 去重：相同 source+target+kind 的边不重复添加。
     pub fn add_edge(&mut self, edge: Edge) {
-        // 去重检查
-        if let Some(edges) = self.outgoing.get(&edge.source)
-            && edges
-                .iter()
-                .any(|e| e.target == edge.target && e.kind == edge.kind)
-        {
+        // 去重检查: O(1) HashSet 查询，insert 返回 false 表示已存在
+        let key = (edge.source.clone(), edge.target.clone(), edge.kind);
+        if !self.edge_dedup.insert(key) {
             return;
         }
 
@@ -274,6 +275,36 @@ mod tests {
         }); // 重复
 
         assert_eq!(graph.edge_count(), 1, "duplicate edges should be deduped");
+    }
+
+    #[test]
+    fn test_edge_dedup_different_kind_kept() {
+        let mut graph = SymbolGraph::new();
+        graph.add_symbol(make_test_symbol("a", "a.rs", 1));
+        graph.add_symbol(make_test_symbol("b", "b.rs", 1));
+
+        let a_id = make_symbol_id(std::path::Path::new("a.rs"), "a", 1);
+        let b_id = make_symbol_id(std::path::Path::new("b.rs"), "b", 1);
+
+        // 相同 source+target 但 kind 不同 — 不应被去重
+        graph.add_edge(Edge {
+            source: a_id.clone(),
+            target: b_id.clone(),
+            kind: EdgeKind::Call,
+            weight: 1.0,
+        });
+        graph.add_edge(Edge {
+            source: a_id.clone(),
+            target: b_id.clone(),
+            kind: EdgeKind::Import,
+            weight: 0.3,
+        });
+
+        assert_eq!(
+            graph.edge_count(),
+            2,
+            "edges with different kind should not be deduped"
+        );
     }
 
     #[test]

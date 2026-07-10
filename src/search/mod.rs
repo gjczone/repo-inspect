@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
@@ -68,36 +69,40 @@ impl FileFinder {
             .walk()
             .with_context(|| format!("Failed to walk repository at {}", self.root.display()))?;
 
-        let mut results = Vec::new();
+        // 并行读取文件并评分：rayon par_iter 替代串行 for 循环
+        let root = &self.root;
+        let mut results: Vec<FileMatch> = files
+            .par_iter()
+            .filter_map(|full_path| {
+                let content = std::fs::read_to_string(full_path).ok()?;
 
-        for full_path in &files {
-            let content = match std::fs::read_to_string(full_path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
+                let file_name = full_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
 
-            let file_name = full_path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
+                let rel_path = full_path.strip_prefix(root).unwrap_or(full_path);
 
-            let rel_path = full_path.strip_prefix(&self.root).unwrap_or(full_path);
+                // Score: file name match × 3 + content match count
+                let name_score =
+                    terms.iter().filter(|t| file_name.contains(*t)).count() as f64 * 3.0;
+                let content_lower = content.to_lowercase();
+                let content_score =
+                    terms.iter().filter(|t| content_lower.contains(*t)).count() as f64;
 
-            // Score: file name match × 3 + content match count
-            let name_score = terms.iter().filter(|t| file_name.contains(*t)).count() as f64 * 3.0;
-            let content_lower = content.to_lowercase();
-            let content_score = terms.iter().filter(|t| content_lower.contains(*t)).count() as f64;
-
-            let total_score = name_score + content_score;
-            if total_score > 0.0 {
-                let matching_lines = extract_matching_lines(&content, &terms);
-                results.push(FileMatch {
-                    path: rel_path.to_path_buf(),
-                    score: total_score,
-                    matching_lines,
-                });
-            }
-        }
+                let total_score = name_score + content_score;
+                if total_score > 0.0 {
+                    let matching_lines = extract_matching_lines(&content, &terms);
+                    Some(FileMatch {
+                        path: rel_path.to_path_buf(),
+                        score: total_score,
+                        matching_lines,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
 
         results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(Ordering::Equal));
         Ok(results)
