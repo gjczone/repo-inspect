@@ -205,7 +205,7 @@ If a tool errors or is unavailable, try once more, then work around it. But you 
 
 ## Architecture
 
-Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`, `overview`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + content matching via `ignore` crate), `scan` (3-phase tree-sitter pipeline with `CompiledQueries` caching in `scan/parser.rs` — serial I/O → per-language Query compilation → rayon parallel parsing), `output` (Markdown + JSON formatting), `remote` (parallel file downloads via rayon `par_iter` on `raw.githubusercontent.com`), `git` (reserved for future git-based analysis).
+Single binary with command-based routing. Each subcommand (`find-how`, `trace`, `entries`, `patterns`, `data`, `hotspots`, `overview`) is an independent module under `src/commands/`. Shared infrastructure: `search` (file traversal + parallel content matching via `ignore` crate + rayon `par_iter`), `scan` (3-phase tree-sitter pipeline — walker path collection → parallel `fs::read` → per-language Query compilation → rayon parallel parsing), `output` (Markdown + JSON formatting), `remote` (parallel file downloads + parallel writes via rayon, `rayon::join` for multi-fetch parallelism), `graph` (symbol graph builder with HashSet-based O(1) edge dedup, PageRank with pre-computed dangling set).
 
 ## Change Map
 

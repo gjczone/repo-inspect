@@ -21,6 +21,15 @@ Initial release — surgical codebase inspection CLI for AI agents.
 - **Dual output**: Markdown (default) and JSON (`--output json`)
 - **Skill distribution**: bundled binary under `skills/repo-inspect/scripts/` for `npx skills add`
 
+## [0.1.6] - 2026-07-10
+
+### Changed
+
+- **Remote 模块并行化 I/O (#69)**: 抽取 `download_files_to_cache` 共享下载函数；并行写盘（`par_iter().try_for_each` + `Mutex`）；`prepare_lightweight` 三路 fetch 用 `rayon::join` 嵌套并行；README 6 候选和配置文件 4 候选改为并行探测
+- **Scan/Search 模块并行化 (#71)**: L1 文本搜索 `par_iter` 并行读盘评分；scan 阶段 1 拆分为 walker 路径收集 + `par_iter` 并行 `fs::read`；`for_each_query_match` 通用查询迭代器消除 symbol/import/call 三段重复
+- **Graph 模块降复杂度 (#73)**: `add_edge` 去重 O(K) 线性扫描 → O(1) `HashSet<(SymbolId, SymbolId, EdgeKind)>`；`build_graph` 两阶段边收集消除 4 处 `Vec<SymbolId>` 克隆
+- **Commands/Output 去重 (#75)**: trace 抽取 `write_trace_section_md` 参数化 helper；overview 抽取 `language_stats_from_counts` 和 `build_dir_infos` 共享转换函数
+
 ## [0.1.5] - 2026-07-10
 
 ### Fixed
