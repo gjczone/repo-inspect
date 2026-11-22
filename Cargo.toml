@@ -25,7 +25,7 @@ env_logger = "0.11"
 minreq = { version = "2", features = ["https-native"] }
 
 # Tree-sitter (L2)
-tree-sitter = "0.26"
+tree-sitter = "0.27"
 tree-sitter-rust = "0.24"
 tree-sitter-python = "0.25"
 tree-sitter-typescript = "0.23"
